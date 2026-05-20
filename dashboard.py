@@ -406,6 +406,7 @@ else:
 if _state.get("reload_needed"):
     _state["reload_needed"] = False
     st.session_state.pop("df_raw", None)
+    st.session_state.pop("df_traffic", None)
     st.toast("새 파일이 감지되어 대시보드를 갱신합니다!", icon="🔄")
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -416,21 +417,31 @@ df_raw = pd.DataFrame()
 
 if USE_GDRIVE:
     # ── Google Drive 모드 (Streamlit Cloud) ──────────────────────────────
-    folder_id = st.secrets["gdrive"]["folder_id"]
-    creds_info = dict(st.secrets["gdrive"]["credentials"])
+    folder_id         = st.secrets["gdrive"]["folder_id"]
+    folder_id_traffic = st.secrets["gdrive"].get("folder_id_traffic", "")
+    creds_info        = dict(st.secrets["gdrive"]["credentials"])
 
     if "df_raw" not in st.session_state:
-        with st.spinner("Google Drive에서 데이터 로딩 중..."):
+        with st.spinner("판매 데이터 로딩 중..."):
             df_raw = load_from_gdrive(folder_id, creds_info)
             st.session_state["df_raw"] = df_raw
     else:
         df_raw = st.session_state["df_raw"]
 
+    if folder_id_traffic:
+        if "df_traffic" not in st.session_state:
+            with st.spinner("트래픽 데이터 로딩 중..."):
+                df_traffic = load_from_gdrive(folder_id_traffic, creds_info)
+                st.session_state["df_traffic"] = df_traffic
+        else:
+            df_traffic = st.session_state["df_traffic"]
+    else:
+        df_traffic = pd.DataFrame()
+
     if st.sidebar.button("수동 새로고침", use_container_width=True):
-        with st.spinner("Google Drive에서 최신 데이터 로딩 중..."):
-            df_raw = load_from_gdrive(folder_id, creds_info)
-            st.session_state["df_raw"] = df_raw
-        st.toast("갱신 완료!")
+        st.session_state.pop("df_raw", None)
+        st.session_state.pop("df_traffic", None)
+        st.rerun()
 
     st.sidebar.success("☁️ Google Drive 연동 중")
     st.sidebar.caption("매일 오전 11시 자동 갱신")
@@ -463,6 +474,18 @@ else:
             f"마지막 확인: {datetime.now().strftime('%H:%M:%S')}"
         )
         st.sidebar.info("매일 오전 11시에 새 파일을 자동 감지합니다.")
+
+        st.sidebar.markdown("---")
+        traffic_folder = st.sidebar.text_input("트래픽 데이터 폴더 경로", value="", key="traffic_folder")
+        if traffic_folder and os.path.isdir(traffic_folder):
+            if "df_traffic" not in st.session_state:
+                with st.spinner("트래픽 데이터 로딩 중..."):
+                    df_traffic = load_from_folder(traffic_folder)
+                    st.session_state["df_traffic"] = df_traffic
+            else:
+                df_traffic = st.session_state["df_traffic"]
+        else:
+            df_traffic = pd.DataFrame()
     else:
         uploaded = st.sidebar.file_uploader(
             "엑셀 파일 선택 (복수 가능)",
@@ -475,6 +498,7 @@ else:
                 st.session_state["df_raw"] = df_raw
         elif "df_raw" in st.session_state:
             df_raw = st.session_state["df_raw"]
+        df_traffic = st.session_state.get("df_traffic", pd.DataFrame())
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 st.title("🛒 브랜드 스토어 판매 성과 대시보드")
@@ -535,8 +559,8 @@ if len(daily) >= 2:
 st.markdown("---")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_prod_trend, tab_day, tab_week, tab_month, tab_product, tab_insight = st.tabs(
-    ["📈 상품 판매 추이", "📅 일간", "📆 주간", "🗓️ 월간", "📦 상품 분석", "💡 인사이트"]
+tab_prod_trend, tab_day, tab_week, tab_month, tab_product, tab_traffic, tab_conversion, tab_insight = st.tabs(
+    ["📈 상품 판매 추이", "📅 일간", "📆 주간", "🗓️ 월간", "📦 상품 분석", "📺 채널 트래픽", "🎯 전환율 분석", "💡 인사이트"]
 )
 
 with tab_day:
@@ -762,6 +786,164 @@ with tab_prod_trend:
         rank_df.columns = [c.strftime(x_fmt.replace(" 주", "")) if hasattr(c, "strftime") else str(c)
                            for c in rank_df.columns]
         st.dataframe(rank_df, use_container_width=True)
+
+with tab_traffic:
+    st.subheader("채널별 트래픽 추이")
+    if df_traffic.empty:
+        st.info("트래픽 데이터가 없습니다. 사이드바에서 트래픽 데이터 폴더를 설정하거나 Google Drive 연동을 확인하세요.")
+    else:
+        TRAFFIC_COLS = {
+            "유입수": "유입수", "고객수": "고객수", "광고비": "광고비", "페이지수": "페이지수",
+        }
+        tc1, tc2, tc3 = st.columns([1, 1, 2])
+        with tc1:
+            t_metric = st.selectbox("지표", list(TRAFFIC_COLS.keys()), key="tc_metric")
+        with tc2:
+            t_period = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="tc_period")
+        with tc3:
+            all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
+            sel_groups = st.multiselect("채널그룹 선택", all_groups, default=all_groups[:6] if len(all_groups) >= 6 else all_groups, key="tc_groups")
+
+        df_t = df_traffic[df_traffic["채널그룹"].isin(sel_groups)] if sel_groups else df_traffic
+
+        if t_period == "일간":
+            t_grouped = df_t.groupby(["날짜", "채널그룹"])[t_metric].sum().reset_index()
+        elif t_period == "주간":
+            df_t = df_t.copy(); df_t["_기간"] = df_t["날짜"].dt.to_period("W").dt.start_time
+            t_grouped = df_t.groupby(["_기간", "채널그룹"])[t_metric].sum().reset_index().rename(columns={"_기간": "날짜"})
+        else:
+            df_t = df_t.copy(); df_t["_기간"] = df_t["날짜"].dt.to_period("M").dt.start_time
+            t_grouped = df_t.groupby(["_기간", "채널그룹"])[t_metric].sum().reset_index().rename(columns={"_기간": "날짜"})
+
+        fig_tl = px.line(t_grouped, x="날짜", y=t_metric, color="채널그룹",
+                         markers=True, title=f"채널그룹별 {t_period} {t_metric} 추이")
+        fig_tl.update_layout(height=420, hovermode="x unified",
+                             legend=dict(orientation="h", y=-0.25), plot_bgcolor="white")
+        st.plotly_chart(fig_tl, use_container_width=True)
+
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            # 채널속성별(모바일/PC) 파이
+            if "채널속성" in df_traffic.columns:
+                attr_agg = df_traffic.groupby("채널속성")[t_metric].sum().reset_index()
+                fig_pie = px.pie(attr_agg, names="채널속성", values=t_metric,
+                                 title=f"채널속성별 {t_metric} 비중", hole=0.4)
+                st.plotly_chart(fig_pie, use_container_width=True)
+        with col_t2:
+            # 채널명 상위 N 바차트
+            top_ch = (df_traffic.groupby("채널명")[t_metric].sum()
+                      .nlargest(10).reset_index())
+            fig_bar = px.bar(top_ch, x=t_metric, y="채널명", orientation="h",
+                             title=f"채널명 상위 10 ({t_metric})", color=t_metric,
+                             color_continuous_scale="Blues")
+            fig_bar.update_layout(yaxis=dict(autorange="reversed"), height=380)
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        # 기간별 채널 누적 바차트
+        fig_stack = px.bar(t_grouped, x="날짜", y=t_metric, color="채널그룹",
+                           barmode="stack", title=f"채널그룹별 {t_period} {t_metric} 구성")
+        fig_stack.update_layout(height=360, legend=dict(orientation="h", y=-0.25), plot_bgcolor="white")
+        st.plotly_chart(fig_stack, use_container_width=True)
+
+
+with tab_conversion:
+    st.subheader("채널별 전환율 & ROAS 분석")
+    if df_traffic.empty:
+        st.info("트래픽 데이터가 없습니다.")
+    else:
+        cv1, cv2 = st.columns([1, 3])
+        with cv1:
+            cv_period = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=False, key="cv_period")
+        with cv2:
+            cv_attr = st.multiselect("채널속성 필터",
+                                     sorted(df_traffic["채널속성"].dropna().unique()) if "채널속성" in df_traffic.columns else [],
+                                     default=list(df_traffic["채널속성"].dropna().unique()) if "채널속성" in df_traffic.columns else [],
+                                     key="cv_attr")
+
+        df_cv = df_traffic[df_traffic["채널속성"].isin(cv_attr)] if cv_attr else df_traffic
+
+        # 기간 집계
+        def _period_col(d, p):
+            d = d.copy()
+            if p == "주간": d["_기간"] = d["날짜"].dt.to_period("W").dt.start_time
+            elif p == "월간": d["_기간"] = d["날짜"].dt.to_period("M").dt.start_time
+            else: d["_기간"] = d["날짜"]
+            return d
+
+        df_cv = _period_col(df_cv, cv_period)
+        cv_agg = df_cv.groupby(["_기간", "채널그룹"]).agg(
+            유입수=("유입수", "sum"),
+            결제수=("결제수(마지막클릭)", "sum"),
+            결제금액=("결제금액(마지막클릭)", "sum"),
+            광고비=("광고비", "sum"),
+        ).reset_index().rename(columns={"_기간": "날짜"})
+        cv_agg["전환율"] = (cv_agg["결제수"] / cv_agg["유입수"].replace(0, np.nan) * 100).fillna(0)
+        cv_agg["ROAS"] = (cv_agg["결제금액"] / cv_agg["광고비"].replace(0, np.nan)).fillna(0)
+
+        # KPI
+        total_visits = df_traffic["유입수"].sum()
+        total_orders = df_traffic["결제수(마지막클릭)"].sum()
+        total_revenue = df_traffic["결제금액(마지막클릭)"].sum()
+        total_adspend = df_traffic["광고비"].sum()
+        overall_cvr = total_orders / total_visits * 100 if total_visits else 0
+        overall_roas = total_revenue / total_adspend if total_adspend else 0
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("총 유입수", f"{int(total_visits):,}")
+        k2.metric("총 결제수", f"{int(total_orders):,}")
+        k3.metric("전체 전환율", f"{overall_cvr:.2f}%")
+        k4.metric("전체 ROAS", f"{overall_roas:.1f}" if overall_roas else "N/A")
+        st.markdown("---")
+
+        col_c1, col_c2 = st.columns(2)
+        with col_c1:
+            # 채널그룹별 전환율 추이
+            fig_cvr = px.line(cv_agg, x="날짜", y="전환율", color="채널그룹",
+                              markers=True, title=f"채널그룹별 {cv_period} 전환율(%)")
+            fig_cvr.update_layout(height=380, hovermode="x unified", plot_bgcolor="white",
+                                  legend=dict(orientation="h", y=-0.3))
+            st.plotly_chart(fig_cvr, use_container_width=True)
+        with col_c2:
+            # 채널그룹별 ROAS 추이
+            cv_roas = cv_agg[cv_agg["ROAS"] > 0]
+            fig_roas = px.line(cv_roas, x="날짜", y="ROAS", color="채널그룹",
+                               markers=True, title=f"채널그룹별 {cv_period} ROAS")
+            fig_roas.update_layout(height=380, hovermode="x unified", plot_bgcolor="white",
+                                   legend=dict(orientation="h", y=-0.3))
+            st.plotly_chart(fig_roas, use_container_width=True)
+
+        # 채널별 전환율 vs 유입수 버블차트
+        ch_agg = df_cv.groupby("채널명").agg(
+            유입수=("유입수", "sum"),
+            결제수=("결제수(마지막클릭)", "sum"),
+            결제금액=("결제금액(마지막클릭)", "sum"),
+            광고비=("광고비", "sum"),
+            채널그룹=("채널그룹", "first"),
+        ).reset_index()
+        ch_agg["전환율"] = (ch_agg["결제수"] / ch_agg["유입수"].replace(0, np.nan) * 100).fillna(0)
+        ch_agg["ROAS"] = (ch_agg["결제금액"] / ch_agg["광고비"].replace(0, np.nan)).fillna(0)
+        ch_agg["채널명_단축"] = ch_agg["채널명"].str[:15]
+
+        fig_bubble = px.scatter(
+            ch_agg, x="유입수", y="전환율", size="결제금액",
+            color="채널그룹", hover_name="채널명",
+            title="채널별 유입수 vs 전환율 (버블 크기 = 결제금액)",
+            labels={"유입수": "유입수", "전환율": "전환율(%)"},
+        )
+        fig_bubble.update_layout(height=440)
+        st.plotly_chart(fig_bubble, use_container_width=True)
+
+        # 채널별 광고비 vs 결제금액 비교
+        ch_paid = ch_agg[ch_agg["광고비"] > 0].nlargest(15, "유입수")
+        if not ch_paid.empty:
+            fig_adrev = go.Figure()
+            fig_adrev.add_bar(x=ch_paid["채널명_단축"], y=ch_paid["광고비"], name="광고비", marker_color="#f44336")
+            fig_adrev.add_bar(x=ch_paid["채널명_단축"], y=ch_paid["결제금액"], name="결제금액", marker_color="#4CAF50")
+            fig_adrev.update_layout(barmode="group", title="채널별 광고비 vs 결제금액",
+                                    height=380, plot_bgcolor="white",
+                                    legend=dict(orientation="h"))
+            st.plotly_chart(fig_adrev, use_container_width=True)
+
 
 with tab_insight:
     st.subheader("💡 자동 인사이트 & 이상 감지")
