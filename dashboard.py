@@ -795,53 +795,65 @@ with tab_traffic:
         TRAFFIC_COLS = {
             "유입수": "유입수", "고객수": "고객수", "광고비": "광고비", "페이지수": "페이지수",
         }
-        tc1, tc2, tc3 = st.columns([1, 1, 2])
+        tc1, tc2 = st.columns([1, 1])
         with tc1:
             t_metric = st.selectbox("지표", list(TRAFFIC_COLS.keys()), key="tc_metric")
         with tc2:
             t_period = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="tc_period")
-        with tc3:
-            all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
-            sel_groups = st.multiselect("채널그룹 선택", all_groups, default=all_groups[:6] if len(all_groups) >= 6 else all_groups, key="tc_groups")
 
-        df_t = df_traffic[df_traffic["채널그룹"].isin(sel_groups)] if sel_groups else df_traffic
+        # 채널그룹 필터 (기본 표시 단위)
+        all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
+        sel_groups = st.multiselect("채널그룹 선택 (기본 표시 단위)", all_groups, default=all_groups, key="tc_groups")
+
+        # 채널명 세부 필터 (선택 시 채널명 단위로 드릴다운)
+        df_t_base = df_traffic[df_traffic["채널그룹"].isin(sel_groups)] if sel_groups else df_traffic
+        all_channels = sorted(df_t_base["채널명"].dropna().unique()) if "채널명" in df_t_base.columns else []
+        sel_channels = st.multiselect(
+            "채널명 세부 필터 (선택 시 채널명 단위로 표시 / 미선택 시 채널그룹 단위)",
+            all_channels, default=[], key="tc_channels"
+        )
+
+        # 그룹 키 및 적용 데이터 결정
+        if sel_channels:
+            df_t = df_t_base[df_t_base["채널명"].isin(sel_channels)]
+            t_group_key = "채널명"
+        else:
+            df_t = df_t_base
+            t_group_key = "채널그룹"
 
         if t_period == "일간":
-            t_grouped = df_t.groupby(["날짜", "채널그룹"])[t_metric].sum().reset_index()
+            t_grouped = df_t.groupby(["날짜", t_group_key])[t_metric].sum().reset_index()
         elif t_period == "주간":
             df_t = df_t.copy(); df_t["_기간"] = df_t["날짜"].dt.to_period("W").dt.start_time
-            t_grouped = df_t.groupby(["_기간", "채널그룹"])[t_metric].sum().reset_index().rename(columns={"_기간": "날짜"})
+            t_grouped = df_t.groupby(["_기간", t_group_key])[t_metric].sum().reset_index().rename(columns={"_기간": "날짜"})
         else:
             df_t = df_t.copy(); df_t["_기간"] = df_t["날짜"].dt.to_period("M").dt.start_time
-            t_grouped = df_t.groupby(["_기간", "채널그룹"])[t_metric].sum().reset_index().rename(columns={"_기간": "날짜"})
+            t_grouped = df_t.groupby(["_기간", t_group_key])[t_metric].sum().reset_index().rename(columns={"_기간": "날짜"})
 
-        fig_tl = px.line(t_grouped, x="날짜", y=t_metric, color="채널그룹",
-                         markers=True, title=f"채널그룹별 {t_period} {t_metric} 추이")
+        t_title_prefix = "채널명별" if sel_channels else "채널그룹별"
+        fig_tl = px.line(t_grouped, x="날짜", y=t_metric, color=t_group_key,
+                         markers=True, title=f"{t_title_prefix} {t_period} {t_metric} 추이")
         fig_tl.update_layout(height=420, hovermode="x unified",
                              legend=dict(orientation="h", y=-0.25), plot_bgcolor="white")
         st.plotly_chart(fig_tl, use_container_width=True)
 
         col_t1, col_t2 = st.columns(2)
         with col_t1:
-            # 채널속성별(모바일/PC) 파이
-            if "채널속성" in df_traffic.columns:
-                attr_agg = df_traffic.groupby("채널속성")[t_metric].sum().reset_index()
+            if "채널속성" in df_t.columns:
+                attr_agg = df_t.groupby("채널속성")[t_metric].sum().reset_index()
                 fig_pie = px.pie(attr_agg, names="채널속성", values=t_metric,
                                  title=f"채널속성별 {t_metric} 비중", hole=0.4)
                 st.plotly_chart(fig_pie, use_container_width=True)
         with col_t2:
-            # 채널명 상위 N 바차트
-            top_ch = (df_traffic.groupby("채널명")[t_metric].sum()
-                      .nlargest(10).reset_index())
+            top_ch = df_t.groupby("채널명")[t_metric].sum().nlargest(10).reset_index()
             fig_bar = px.bar(top_ch, x=t_metric, y="채널명", orientation="h",
                              title=f"채널명 상위 10 ({t_metric})", color=t_metric,
                              color_continuous_scale="Blues")
             fig_bar.update_layout(yaxis=dict(autorange="reversed"), height=380)
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        # 기간별 채널 누적 바차트
-        fig_stack = px.bar(t_grouped, x="날짜", y=t_metric, color="채널그룹",
-                           barmode="stack", title=f"채널그룹별 {t_period} {t_metric} 구성")
+        fig_stack = px.bar(t_grouped, x="날짜", y=t_metric, color=t_group_key,
+                           barmode="stack", title=f"{t_title_prefix} {t_period} {t_metric} 구성")
         fig_stack.update_layout(height=360, legend=dict(orientation="h", y=-0.25), plot_bgcolor="white")
         st.plotly_chart(fig_stack, use_container_width=True)
 
@@ -851,18 +863,29 @@ with tab_conversion:
     if df_traffic.empty:
         st.info("트래픽 데이터가 없습니다.")
     else:
-        cv1, cv2 = st.columns([1, 3])
+        cv1, cv2 = st.columns([1, 1])
         with cv1:
             cv_period = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=False, key="cv_period")
         with cv2:
-            cv_attr = st.multiselect("채널속성 필터",
-                                     sorted(df_traffic["채널속성"].dropna().unique()) if "채널속성" in df_traffic.columns else [],
-                                     default=list(df_traffic["채널속성"].dropna().unique()) if "채널속성" in df_traffic.columns else [],
-                                     key="cv_attr")
+            # 채널그룹 필터 (기본 표시 단위)
+            cv_all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
+            cv_sel_groups = st.multiselect("채널그룹 선택 (기본 표시 단위)", cv_all_groups, default=cv_all_groups, key="cv_groups")
 
-        df_cv = df_traffic[df_traffic["채널속성"].isin(cv_attr)] if cv_attr else df_traffic
+        # 채널명 세부 필터 (선택 시 채널명 단위로 드릴다운)
+        df_cv_base = df_traffic[df_traffic["채널그룹"].isin(cv_sel_groups)] if cv_sel_groups else df_traffic
+        cv_all_channels = sorted(df_cv_base["채널명"].dropna().unique()) if "채널명" in df_cv_base.columns else []
+        cv_sel_channels = st.multiselect(
+            "채널명 세부 필터 (선택 시 채널명 단위로 표시 / 미선택 시 채널그룹 단위)",
+            cv_all_channels, default=[], key="cv_channels"
+        )
 
-        # 기간 집계
+        if cv_sel_channels:
+            df_cv = df_cv_base[df_cv_base["채널명"].isin(cv_sel_channels)]
+            cv_group_key = "채널명"
+        else:
+            df_cv = df_cv_base
+            cv_group_key = "채널그룹"
+
         def _period_col(d, p):
             d = d.copy()
             if p == "주간": d["_기간"] = d["날짜"].dt.to_period("W").dt.start_time
@@ -871,7 +894,7 @@ with tab_conversion:
             return d
 
         df_cv = _period_col(df_cv, cv_period)
-        cv_agg = df_cv.groupby(["_기간", "채널그룹"]).agg(
+        cv_agg = df_cv.groupby(["_기간", cv_group_key]).agg(
             유입수=("유입수", "sum"),
             결제수=("결제수(마지막클릭)", "sum"),
             결제금액=("결제금액(마지막클릭)", "sum"),
@@ -880,45 +903,43 @@ with tab_conversion:
         cv_agg["전환율"] = (cv_agg["결제수"] / cv_agg["유입수"].replace(0, np.nan) * 100).fillna(0)
         cv_agg["ROAS"] = (cv_agg["결제금액"] / cv_agg["광고비"].replace(0, np.nan)).fillna(0)
 
-        # KPI
-        total_visits = df_traffic["유입수"].sum()
-        total_orders = df_traffic["결제수(마지막클릭)"].sum()
-        total_revenue = df_traffic["결제금액(마지막클릭)"].sum()
-        total_adspend = df_traffic["광고비"].sum()
-        overall_cvr = total_orders / total_visits * 100 if total_visits else 0
-        overall_roas = total_revenue / total_adspend if total_adspend else 0
+        # KPI (필터 적용된 데이터 기준)
+        total_visits = df_cv["유입수"].sum()
+        total_orders_cv = df_cv["결제수(마지막클릭)"].sum()
+        total_revenue_cv = df_cv["결제금액(마지막클릭)"].sum()
+        total_adspend = df_cv["광고비"].sum()
+        overall_cvr = total_orders_cv / total_visits * 100 if total_visits else 0
+        overall_roas = total_revenue_cv / total_adspend if total_adspend else 0
 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("총 유입수", f"{int(total_visits):,}")
-        k2.metric("총 결제수", f"{int(total_orders):,}")
+        k2.metric("총 결제수", f"{int(total_orders_cv):,}")
         k3.metric("전체 전환율", f"{overall_cvr:.2f}%")
         k4.metric("전체 ROAS", f"{overall_roas:.1f}" if overall_roas else "N/A")
         st.markdown("---")
 
+        cv_title_prefix = "채널명별" if cv_sel_channels else "채널그룹별"
         col_c1, col_c2 = st.columns(2)
         with col_c1:
-            # 채널그룹별 전환율 추이
-            fig_cvr = px.line(cv_agg, x="날짜", y="전환율", color="채널그룹",
-                              markers=True, title=f"채널그룹별 {cv_period} 전환율(%)")
+            fig_cvr = px.line(cv_agg, x="날짜", y="전환율", color=cv_group_key,
+                              markers=True, title=f"{cv_title_prefix} {cv_period} 전환율(%)")
             fig_cvr.update_layout(height=380, hovermode="x unified", plot_bgcolor="white",
                                   legend=dict(orientation="h", y=-0.3))
             st.plotly_chart(fig_cvr, use_container_width=True)
         with col_c2:
-            # 채널그룹별 ROAS 추이
             cv_roas = cv_agg[cv_agg["ROAS"] > 0]
-            fig_roas = px.line(cv_roas, x="날짜", y="ROAS", color="채널그룹",
-                               markers=True, title=f"채널그룹별 {cv_period} ROAS")
+            fig_roas = px.line(cv_roas, x="날짜", y="ROAS", color=cv_group_key,
+                               markers=True, title=f"{cv_title_prefix} {cv_period} ROAS")
             fig_roas.update_layout(height=380, hovermode="x unified", plot_bgcolor="white",
                                    legend=dict(orientation="h", y=-0.3))
             st.plotly_chart(fig_roas, use_container_width=True)
 
-        # 채널별 전환율 vs 유입수 버블차트
-        ch_agg = df_cv.groupby("채널명").agg(
+        # 버블차트: 항상 채널명 레벨
+        ch_agg = df_cv.groupby(["채널명", "채널그룹"]).agg(
             유입수=("유입수", "sum"),
             결제수=("결제수(마지막클릭)", "sum"),
             결제금액=("결제금액(마지막클릭)", "sum"),
             광고비=("광고비", "sum"),
-            채널그룹=("채널그룹", "first"),
         ).reset_index()
         ch_agg["전환율"] = (ch_agg["결제수"] / ch_agg["유입수"].replace(0, np.nan) * 100).fillna(0)
         ch_agg["ROAS"] = (ch_agg["결제금액"] / ch_agg["광고비"].replace(0, np.nan)).fillna(0)
@@ -933,7 +954,6 @@ with tab_conversion:
         fig_bubble.update_layout(height=440)
         st.plotly_chart(fig_bubble, use_container_width=True)
 
-        # 채널별 광고비 vs 결제금액 비교
         ch_paid = ch_agg[ch_agg["광고비"] > 0].nlargest(15, "유입수")
         if not ch_paid.empty:
             fig_adrev = go.Figure()
