@@ -1,0 +1,7 @@
+# 실제 secrets는 절대 GitHub에 올리지 않습니다
+.streamlit/secrets.toml
+
+# 로컬 실행 파일
+*.bat
+__pycache__/
+.python-version
