@@ -128,13 +128,18 @@ def load_from_folder(folder: str) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
-@st.cache_data(ttl=3600, show_spinner="Google Drive에서 데이터 로딩 중...")
-def load_from_gdrive(folder_id: str, creds_info: dict) -> pd.DataFrame:
+def _build_drive_service(creds_info: dict):
     creds = service_account.Credentials.from_service_account_info(
         creds_info,
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
     )
-    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _list_drive_files(folder_id: str, creds_info: dict) -> list[dict]:
+    """파일 목록만 가져옴 (메타데이터만, 빠름)"""
+    service = _build_drive_service(creds_info)
     results = service.files().list(
         q=(
             f"'{folder_id}' in parents"
@@ -144,27 +149,44 @@ def load_from_gdrive(folder_id: str, creds_info: dict) -> pd.DataFrame:
         fields="files(id, name)",
         orderBy="name",
     ).execute()
+    return results.get("files", [])
 
+
+@st.cache_data(show_spinner=False)
+def _download_one_file(file_id: str, file_name: str, creds_info: dict) -> pd.DataFrame | None:
+    """파일 1개 다운로드 — file_id가 같으면 영구 캐시"""
+    date_str = parse_date_from_filename(file_name)
+    if not date_str:
+        return None
+    try:
+        service = _build_drive_service(creds_info)
+        request = service.files().get_media(fileId=file_id)
+        buf = io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        buf.seek(0)
+        df = pd.read_excel(buf, engine="openpyxl")
+        df["날짜"] = pd.to_datetime(date_str)
+        df["파일명"] = file_name
+        return df
+    except Exception as e:
+        st.warning(f"Drive 파일 읽기 오류 {file_name}: {e}")
+        return None
+
+
+def load_from_gdrive(folder_id: str, creds_info: dict) -> pd.DataFrame:
+    """파일 목록 확인 후 새 파일만 다운로드 (기존 파일은 캐시 사용)"""
+    files = _list_drive_files(folder_id, creds_info)
     dfs = []
-    for f in results.get("files", []):
-        date_str = parse_date_from_filename(f["name"])
-        if not date_str:
-            continue
-        try:
-            request = service.files().get_media(fileId=f["id"])
-            buf = io.BytesIO()
-            downloader = MediaIoBaseDownload(buf, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-            buf.seek(0)
-            df = pd.read_excel(buf, engine="openpyxl")
-            df["날짜"] = pd.to_datetime(date_str)
-            df["파일명"] = f["name"]
+    progress = st.progress(0, text="데이터 로딩 중...")
+    for i, f in enumerate(files):
+        df = _download_one_file(f["id"], f["name"], creds_info)
+        if df is not None:
             dfs.append(df)
-        except Exception as e:
-            st.warning(f"Drive 파일 읽기 오류 {f['name']}: {e}")
-
+        progress.progress((i + 1) / max(len(files), 1), text=f"로딩 중... ({i+1}/{len(files)})")
+    progress.empty()
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
