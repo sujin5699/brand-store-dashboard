@@ -107,6 +107,7 @@ def load_excel_files(files) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
+@st.cache_data(ttl=3600, show_spinner="폴더에서 데이터 로딩 중...")
 def load_from_folder(folder: str) -> pd.DataFrame:
     dfs = []
     for fname in os.listdir(folder):
@@ -127,6 +128,7 @@ def load_from_folder(folder: str) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
+@st.cache_data(ttl=3600, show_spinner="Google Drive에서 데이터 로딩 중...")
 def load_from_gdrive(folder_id: str, creds_info: dict) -> pd.DataFrame:
     creds = service_account.Credentials.from_service_account_info(
         creds_info,
