@@ -676,10 +676,44 @@ if df_raw.empty:
     )
     st.stop()
 
+# ── 기간 단위 자동 결정 ───────────────────────────────────────────────────────
+if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+    _dr_start, _dr_end = date_range[0], date_range[1]
+else:
+    _dr_start = df_raw["날짜"].min().date()
+    _dr_end   = df_raw["날짜"].max().date()
+_auto_period = auto_period(_dr_start, _dr_end)
+_period_days = (_dr_end - _dr_start).days + 1
+st.sidebar.caption(f"📐 기간 단위: **{_auto_period}** ({_period_days}일 범위 기준 자동 선택)")
+
 # ── Aggregations ─────────────────────────────────────────────────────────────
 daily = aggregate_daily(df_raw)
 weekly = aggregate_weekly(daily)
 monthly = aggregate_monthly(daily)
+
+# ── 전기간 비교 데이터 (KPI delta 용) ─────────────────────────────────────────
+_period_len      = (_dr_end - _dr_start).days + 1
+_prev_end_date   = _dr_start - timedelta(days=1)
+_prev_start_date = _prev_end_date - timedelta(days=_period_len - 1)
+_df_full_raw     = st.session_state.get("df_raw", df_raw)
+_df_prev         = _df_full_raw[
+    (_df_full_raw["날짜"].dt.date >= _prev_start_date) &
+    (_df_full_raw["날짜"].dt.date <= _prev_end_date)
+]
+_daily_prev  = aggregate_daily(_df_prev) if not _df_prev.empty else pd.DataFrame()
+_prev_label  = f"{_prev_start_date.strftime('%m/%d')}~{_prev_end_date.strftime('%m/%d')}"
+
+def _delta_pct(cur, prev_df, col):
+    if prev_df.empty or col not in prev_df.columns: return None
+    p = prev_df[col].sum()
+    return f"{(cur - p) / p * 100:+.1f}%" if p else None
+
+def _delta_pp(cur_val, prev_df, col_num, col_den):
+    """절대값(%p) delta — 환불율·모바일비율 등에 사용"""
+    if prev_df.empty: return None
+    pn = prev_df[col_num].sum(); pd_ = prev_df[col_den].sum()
+    if pd_ == 0: return None
+    return f"{cur_val - pn / pd_ * 100:+.1f}%p"
 
 # ── KPI Cards ────────────────────────────────────────────────────────────────
 total_rev = daily["결제금액"].sum()
@@ -689,34 +723,25 @@ avg_mobile = daily["모바일비율"].mean() * 100
 refund_rate_total = total_refund / total_rev * 100 if total_rev else 0
 
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("총 결제금액", fmt_won(total_rev))
-col2.metric("총 결제건수", f"{int(total_orders):,}건")
-col3.metric("총 환불금액", fmt_won(total_refund))
-col4.metric("환불율", f"{refund_rate_total:.1f}%")
-col5.metric("평균 모바일 비율", f"{avg_mobile:.1f}%")
-
-if len(daily) >= 2:
-    last = daily.iloc[-1]
-    prev2 = daily.iloc[-2]
-    pct_rev = (last["결제금액"] - prev2["결제금액"]) / prev2["결제금액"] * 100 if prev2["결제금액"] else 0
-    pct_ord = (last["결제수"] - prev2["결제수"]) / prev2["결제수"] * 100 if prev2["결제수"] else 0
-    st.caption(
-        f"**최근일({last['날짜'].strftime('%m/%d')}) vs 전일**: "
-        f"결제금액 {pct_rev:+.1f}%  |  결제건수 {pct_ord:+.1f}%"
-    )
+col1.metric("총 결제금액", fmt_won(total_rev),
+            delta=_delta_pct(total_rev, _daily_prev, "결제금액"),
+            help=f"전기간({_prev_label}) 대비")
+col2.metric("총 결제건수", f"{int(total_orders):,}건",
+            delta=_delta_pct(total_orders, _daily_prev, "결제수"),
+            help=f"전기간({_prev_label}) 대비")
+col3.metric("총 환불금액", fmt_won(total_refund),
+            delta=_delta_pct(total_refund, _daily_prev, "환불금액"),
+            delta_color="inverse", help=f"전기간({_prev_label}) 대비")
+col4.metric("환불율", f"{refund_rate_total:.1f}%",
+            delta=_delta_pp(refund_rate_total, _daily_prev, "환불금액", "결제금액"),
+            delta_color="inverse", help=f"전기간({_prev_label}) 대비")
+col5.metric("평균 모바일 비율", f"{avg_mobile:.1f}%",
+            delta=_delta_pp(avg_mobile, _daily_prev, "모바일비율", "결제금액") if not _daily_prev.empty else None,
+            help=f"전기간({_prev_label}) 대비")
+if not _daily_prev.empty:
+    st.caption(f"▲▼ 전기간 비교: **{_prev_label}** ({_period_len}일)")
 
 st.markdown("---")
-
-# ── 기간 단위 자동 결정 ───────────────────────────────────────────────────────
-if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-    _dr_start, _dr_end = date_range[0], date_range[1]
-else:
-    _dr_start = df_raw["날짜"].min().date()
-    _dr_end   = df_raw["날짜"].max().date()
-
-_auto_period = auto_period(_dr_start, _dr_end)
-_period_days = (_dr_end - _dr_start).days + 1
-st.sidebar.caption(f"📐 기간 단위: **{_auto_period}** ({_period_days}일 범위 기준 자동 선택)")
 
 # ── 상단 이상감지 배너 ────────────────────────────────────────────────────────
 _banner_prod_alerts: list[dict] = []
@@ -779,688 +804,608 @@ else:
     )
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_prod_trend, tab_period, tab_product, tab_traffic, tab_conversion, tab_insight = st.tabs(
-    ["📈 상품 판매 추이", "📊 판매 추이", "📦 상품 분석", "📺 채널 트래픽", "🎯 전환율 분석", "💡 인사이트"]
+tab_sales, tab_channel, tab_insight = st.tabs(
+    ["📊 판매 & 상품", "📺 채널", "💡 인사이트"]
 )
 
-with tab_period:
-    period_sel = _auto_period
+with tab_sales:
+    sub_trend, sub_prod_trend, sub_product = st.tabs(
+        ["📈 판매 추이", "🏷️ 상품별 추이", "📦 상품 분석"]
+    )
 
-    if period_sel == "일간":
-        st.plotly_chart(render_trend_chart(daily, "일간 판매 추이", "%m/%d"), use_container_width=True)
-        st.subheader("일별 상세 데이터")
-        disp = daily.copy()
-        disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m-%d")
-        disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
-        disp["환불금액"] = disp["환불금액"].apply(lambda x: f"{int(x):,}")
-        disp["모바일비율"] = (disp["모바일비율"] * 100).map("{:.1f}%".format)
-        st.dataframe(disp, use_container_width=True, hide_index=True)
-
-    elif period_sel == "주간":
-        if len(weekly) < 2:
-            st.info("주간 집계를 위해 2주 이상 데이터가 필요합니다.")
-        else:
-            st.plotly_chart(render_trend_chart(weekly, "주간 판매 추이", "%m/%d 주"), use_container_width=True)
-            disp = weekly.copy()
-            disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m-%d 주")
-            disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
-            disp["환불금액"] = disp["환불금액"].apply(lambda x: f"{int(x):,}")
-            disp["모바일비율"] = (disp["모바일비율"] * 100).map("{:.1f}%".format)
-            st.dataframe(disp, use_container_width=True, hide_index=True)
-
-    else:
-        if len(monthly) < 1:
-            st.info("월간 집계 데이터가 없습니다.")
-        else:
-            st.plotly_chart(render_trend_chart(monthly, "월간 판매 추이", "%Y-%m"), use_container_width=True)
-            disp = monthly.copy()
-            disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m")
-            disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
-            disp["환불금액"] = disp["환불금액"].apply(lambda x: f"{int(x):,}")
-            disp["모바일비율"] = (disp["모바일비율"] * 100).map("{:.1f}%".format)
-            st.dataframe(disp, use_container_width=True, hide_index=True)
-
-with tab_product:
-    st.subheader("상품별 판매 성과")
-    if "상품명" not in df_raw.columns:
-        st.warning("상품명 컬럼이 없습니다.")
-    else:
-        pa1, pa2 = st.columns([1, 2])
-        with pa1:
-            pa_period = st.radio("기간 단위", ["전체", "일간", "주간", "월간"], horizontal=True, key="pa_period")
-
-        df_pa = df_raw.copy()
-        pa_title_suffix = "전체 기간"
-
-        if pa_period != "전체":
-            if pa_period == "일간":
-                avail_vals   = sorted(df_pa["날짜"].dt.date.unique(), reverse=True)
-                avail_labels = [str(v) for v in avail_vals]
-            elif pa_period == "주간":
-                df_pa["_p"]  = df_pa["날짜"].dt.to_period("W").dt.start_time
-                avail_vals   = sorted(df_pa["_p"].unique(), reverse=True)
-                avail_labels = [v.strftime("%Y-%m-%d 주") for v in avail_vals]
-            else:
-                df_pa["_p"]  = df_pa["날짜"].dt.to_period("M").dt.start_time
-                avail_vals   = sorted(df_pa["_p"].unique(), reverse=True)
-                avail_labels = [v.strftime("%Y-%m") for v in avail_vals]
-
-            with pa2:
-                sel_label = st.selectbox("분석 기간", avail_labels, key="pa_pick")
-            sel_val = avail_vals[avail_labels.index(sel_label)]
-            pa_title_suffix = sel_label
-
-            if pa_period == "일간":
-                df_pa = df_pa[df_pa["날짜"].dt.date == sel_val]
-            else:
-                df_pa = df_pa[df_pa["_p"] == sel_val]
-
-        prod_agg = (
-            df_pa.groupby("상품명")
-            .agg(결제금액=("결제금액", "sum"), 결제수=("결제수", "sum"),
-                 환불금액=("환불금액", "sum"), 결제상품수량=("결제상품수량", "sum"))
-            .reset_index()
-            .sort_values("결제금액", ascending=False)
-        )
-        prod_agg["환불율"] = (prod_agg["환불금액"] / prod_agg["결제금액"].replace(0, np.nan) * 100).fillna(0)
-
-        top_n = st.slider("상위 N개 상품", 5, min(30, max(len(prod_agg), 5)), 10, key="pa_topn")
-        top = prod_agg.head(top_n)
-
-        col_a, col_b = st.columns(2)
-        with col_a:
-            fig_bar = px.bar(
-                top, x="결제금액", y="상품명", orientation="h",
-                title=f"상위 상품 결제금액 ({pa_title_suffix})", color="결제금액",
-                color_continuous_scale="Greens",
-                labels={"결제금액": "결제금액(원)", "상품명": ""},
-            )
-            fig_bar.update_layout(yaxis=dict(autorange="reversed"), height=400)
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-        with col_b:
-            fig_scatter = px.scatter(
-                prod_agg.head(top_n * 2), x="결제수", y="환불율",
-                size="결제금액", hover_name="상품명",
-                title=f"결제수 vs 환불율 ({pa_title_suffix})",
-                labels={"결제수": "결제건수", "환불율": "환불율(%)"},
-                color="환불율", color_continuous_scale="RdYlGn_r",
-            )
-            fig_scatter.update_layout(height=400)
-            st.plotly_chart(fig_scatter, use_container_width=True)
-
-        if "상품카테고리(대)" in df_pa.columns:
-            cat_agg = (
-                df_pa.groupby("상품카테고리(대)")
-                .agg(결제금액=("결제금액", "sum"))
-                .reset_index()
-            )
-            fig_pie = px.pie(cat_agg, names="상품카테고리(대)", values="결제금액",
-                             title=f"카테고리별 매출 비중 ({pa_title_suffix})")
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-        st.subheader("전체 상품 상세")
-        disp_prod = prod_agg.copy()
-        disp_prod["결제금액"] = disp_prod["결제금액"].apply(lambda x: f"{int(x):,}")
-        disp_prod["환불금액"] = disp_prod["환불금액"].apply(lambda x: f"{int(x):,}")
-        disp_prod["환불율"]   = disp_prod["환불율"].map("{:.1f}%".format)
-        st.dataframe(disp_prod, use_container_width=True, hide_index=True)
-
-with tab_prod_trend:
-    st.subheader("상품별 판매 변화 추이")
-    if "상품명" not in df_raw.columns:
-        st.warning("상품명 컬럼이 없습니다.")
-    else:
-        n_unique = df_raw["상품명"].nunique()
-
-        ctrl1, ctrl2 = st.columns([1, 1])
-        with ctrl1:
-            _pt_max = max(3, min(20, n_unique))
-            top_n_trend = st.slider("상위 N개 상품", min(3, max(n_unique, 1)), _pt_max, min(5, _pt_max), key="pt_n")
-        with ctrl2:
-            metric_sel = st.selectbox(
-                "지표",
-                ["결제금액", "결제수", "결제상품수량", "환불금액"],
-                key="pt_metric",
-            )
+    # ── 판매 추이 ──────────────────────────────────────────────────────────────
+    with sub_trend:
         period_sel = _auto_period
-
-        # 상위 N 상품 (전체 기간 합산 기준)
-        top_products = (
-            df_raw.groupby("상품명")[metric_sel]
-            .sum()
-            .nlargest(top_n_trend)
-            .index.tolist()
-        )
-        df_top = df_raw[df_raw["상품명"].isin(top_products)].copy()
-
         if period_sel == "일간":
-            df_grouped = (
-                df_top.groupby(["날짜", "상품명"])[metric_sel]
-                .sum()
-                .reset_index()
-            )
-            x_fmt = "%m/%d"
+            st.plotly_chart(render_trend_chart(daily, "일간 판매 추이", "%m/%d"), use_container_width=True)
+            st.subheader("일별 상세 데이터")
+            disp = daily.copy()
+            disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m-%d")
+            disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
+            disp["환불금액"] = disp["환불금액"].apply(lambda x: f"{int(x):,}")
+            disp["모바일비율"] = (disp["모바일비율"] * 100).map("{:.1f}%".format)
+            st.dataframe(disp, use_container_width=True, hide_index=True)
         elif period_sel == "주간":
-            df_top["_기간"] = df_top["날짜"].dt.to_period("W").dt.start_time
-            df_grouped = (
-                df_top.groupby(["_기간", "상품명"])[metric_sel]
-                .sum()
-                .reset_index()
-                .rename(columns={"_기간": "날짜"})
-            )
-            x_fmt = "%m/%d 주"
-        else:
-            df_top["_기간"] = df_top["날짜"].dt.to_period("M").dt.start_time
-            df_grouped = (
-                df_top.groupby(["_기간", "상품명"])[metric_sel]
-                .sum()
-                .reset_index()
-                .rename(columns={"_기간": "날짜"})
-            )
-            x_fmt = "%Y-%m"
-
-        # 상품명을 15자로 줄여서 범례 가독성 확보
-        df_grouped["상품명_단축"] = df_grouped["상품명"].str[:18]
-
-        # 날짜별 순위 계산 & 전체 합산 기준 정렬 (툴팁 표시 순서)
-        df_grouped["순위"] = (
-            df_grouped.groupby("날짜")[metric_sel]
-            .rank(ascending=False, method="min")
-            .astype(int)
-        )
-        total_rank_order = (
-            df_grouped.groupby("상품명_단축")[metric_sel]
-            .sum()
-            .sort_values(ascending=False)
-            .index.tolist()
-        )
-
-        # ── 급락/급등 감지 ────────────────────────────────────────────
-        with st.expander("⚙️ 급락/급등 감지 상세 설정", expanded=False):
-            pt_thresh = st.slider(
-                "임계값 (직전 기간 대비 변화율 %)", 10, 80, 30, 5, key="pt_thresh",
-                help="이 값 이상 변화한 상품만 표시합니다. 전체 평균의 10% 미만 소량 상품은 제외.",
-            )
-            _pt_dates = sorted(df_grouped["날짜"].unique())
-            if len(_pt_dates) >= 2:
-                _pure_fmt  = x_fmt.replace(" 주", "")
-                _suffix    = " 주" if "주" in x_fmt else ""
-                _prev_str  = pd.Timestamp(_pt_dates[-2]).strftime(_pure_fmt) + _suffix
-                _cur_str   = pd.Timestamp(_pt_dates[-1]).strftime(_pure_fmt) + _suffix
-                st.caption(f"📅 비교 기간: {_prev_str} (직전) → **{_cur_str}** (현재)")
-            prod_alerts = detect_product_anomalies(df_grouped, metric_sel, pct_threshold=pt_thresh)
-            if prod_alerts:
-                st.caption(f"직전 {period_sel} 대비 ±{pt_thresh}% 이상 변화 상품 — {len(prod_alerts)}건")
-                _render_anomaly_cards(prod_alerts, kind="product")
-            elif len(_pt_dates) < 2:
-                st.caption("기간이 2개 이상 있어야 감지됩니다.")
+            if len(weekly) < 2:
+                st.info("주간 집계를 위해 2주 이상 데이터가 필요합니다.")
             else:
-                st.success(f"✅ 직전 {period_sel} 대비 ±{pt_thresh}% 이상 변화 상품 없음")
-
-        # ── 멀티라인 차트 ──────────────────────────────────────────────
-        fig_line = px.line(
-            df_grouped,
-            x="날짜", y=metric_sel, color="상품명_단축",
-            markers=True,
-            custom_data=["순위", "상품명_단축"],
-            title=f"상위 {top_n_trend}개 상품 {period_sel} {metric_sel} 추이",
-            labels={"상품명_단축": "상품명", metric_sel: metric_sel},
-            category_orders={"상품명_단축": total_rank_order},
-        )
-        fig_line.update_layout(
-            height=460,
-            legend=dict(orientation="h", y=-0.25, font=dict(size=11)),
-            xaxis_tickformat=x_fmt,
-            hovermode="x unified",
-            plot_bgcolor="white",
-        )
-        fig_line.update_traces(
-            line=dict(width=2.5),
-            hovertemplate="%{customdata[0]}위&nbsp;&nbsp;%{customdata[1]}: %{y:,.0f}<extra></extra>",
-        )
-        st.plotly_chart(fig_line, use_container_width=True)
-
-        # ── 누적 바차트 ────────────────────────────────────────────────
-        fig_bar = px.bar(
-            df_grouped,
-            x="날짜", y=metric_sel, color="상품명_단축",
-            title=f"상위 {top_n_trend}개 상품 {period_sel} {metric_sel} 구성",
-            labels={"상품명_단축": "상품명"},
-            barmode="stack",
-        )
-        fig_bar.update_layout(
-            height=380,
-            legend=dict(orientation="h", y=-0.25, font=dict(size=11)),
-            xaxis_tickformat=x_fmt,
-            plot_bgcolor="white",
-        )
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-        # ── 히트맵 ────────────────────────────────────────────────────
-        pivot = (
-            df_grouped.pivot_table(
-                index="상품명_단축", columns="날짜", values=metric_sel, aggfunc="sum"
-            )
-            .fillna(0)
-        )
-        pivot.columns = [c.strftime(x_fmt.replace(" 주", "")) if hasattr(c, "strftime") else str(c)
-                         for c in pivot.columns]
-
-        fig_heat = go.Figure(
-            go.Heatmap(
-                z=pivot.values,
-                x=pivot.columns.tolist(),
-                y=pivot.index.tolist(),
-                colorscale="Greens",
-                hoverongaps=False,
-                hovertemplate="날짜: %{x}<br>상품: %{y}<br>값: %{z:,.0f}<extra></extra>",
-            )
-        )
-        fig_heat.update_layout(
-            title=f"상품 × 날짜 히트맵 ({metric_sel})",
-            height=max(300, top_n_trend * 40 + 100),
-            xaxis_title="날짜",
-            yaxis_title="",
-            margin=dict(l=180),
-        )
-        st.plotly_chart(fig_heat, use_container_width=True)
-
-        # ── 순위 변동 테이블 ──────────────────────────────────────────
-        st.subheader("기간별 순위 변동")
-        pivot_rank = (
-            df_grouped.pivot_table(
-                index="상품명_단축", columns="날짜", values=metric_sel, aggfunc="sum"
-            )
-            .fillna(0)
-        )
-        rank_df = pivot_rank.rank(ascending=False, method="min").astype(int)
-        rank_df.columns = [c.strftime(x_fmt.replace(" 주", "")) if hasattr(c, "strftime") else str(c)
-                           for c in rank_df.columns]
-        st.dataframe(rank_df, use_container_width=True)
-
-with tab_traffic:
-    st.subheader("채널별 트래픽 추이")
-    if df_traffic.empty:
-        st.info("트래픽 데이터가 없습니다. 사이드바에서 트래픽 데이터 폴더를 설정하거나 Google Drive 연동을 확인하세요.")
-    else:
-        TRAFFIC_COLS = {
-            "유입수": "유입수", "고객수": "고객수", "광고비": "광고비", "페이지수": "페이지수",
-        }
-        t_metric = st.selectbox("지표", list(TRAFFIC_COLS.keys()), key="tc_metric")
-        t_period = _auto_period
-
-        # 채널그룹 필터 (기본 표시 단위)
-        all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
-        sel_groups = st.multiselect("채널그룹 선택 (기본 표시 단위)", all_groups, default=all_groups, key="tc_groups")
-
-        # 채널명 세부 필터 (선택 시 채널명 단위로 드릴다운)
-        df_t_base = df_traffic[df_traffic["채널그룹"].isin(sel_groups)] if sel_groups else df_traffic
-        all_channels = sorted(df_t_base["채널명"].dropna().unique()) if "채널명" in df_t_base.columns else []
-        sel_channels = st.multiselect(
-            "채널명 세부 필터 (선택 시 채널명 단위로 표시 / 미선택 시 채널그룹 단위)",
-            all_channels, default=[], key="tc_channels"
-        )
-
-        # 그룹 키 및 적용 데이터 결정
-        if sel_channels:
-            df_t = df_t_base[df_t_base["채널명"].isin(sel_channels)]
-            t_group_key = "채널명"
+                st.plotly_chart(render_trend_chart(weekly, "주간 판매 추이", "%m/%d 주"), use_container_width=True)
+                disp = weekly.copy()
+                disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m-%d 주")
+                disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
+                disp["환불금액"] = disp["환불금액"].apply(lambda x: f"{int(x):,}")
+                disp["모바일비율"] = (disp["모바일비율"] * 100).map("{:.1f}%".format)
+                st.dataframe(disp, use_container_width=True, hide_index=True)
         else:
-            df_t = df_t_base
-            t_group_key = "채널그룹"
+            if len(monthly) < 1:
+                st.info("월간 집계 데이터가 없습니다.")
+            else:
+                st.plotly_chart(render_trend_chart(monthly, "월간 판매 추이", "%Y-%m"), use_container_width=True)
+                disp = monthly.copy()
+                disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m")
+                disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
+                disp["환불금액"] = disp["환불금액"].apply(lambda x: f"{int(x):,}")
+                disp["모바일비율"] = (disp["모바일비율"] * 100).map("{:.1f}%".format)
+                st.dataframe(disp, use_container_width=True, hide_index=True)
 
-        if t_period == "일간":
-            t_grouped = df_t.groupby(["날짜", t_group_key])[t_metric].sum().reset_index()
-        elif t_period == "주간":
-            df_t = df_t.copy(); df_t["_기간"] = df_t["날짜"].dt.to_period("W").dt.start_time
-            t_grouped = df_t.groupby(["_기간", t_group_key])[t_metric].sum().reset_index().rename(columns={"_기간": "날짜"})
+    # ── 상품별 추이 ────────────────────────────────────────────────────────────
+    with sub_prod_trend:
+        st.subheader("상품별 판매 변화 추이")
+        if "상품명" not in df_raw.columns:
+            st.warning("상품명 컬럼이 없습니다.")
         else:
-            df_t = df_t.copy(); df_t["_기간"] = df_t["날짜"].dt.to_period("M").dt.start_time
-            t_grouped = df_t.groupby(["_기간", t_group_key])[t_metric].sum().reset_index().rename(columns={"_기간": "날짜"})
+            n_unique = df_raw["상품명"].nunique()
+            ctrl1, ctrl2 = st.columns([1, 1])
+            with ctrl1:
+                _pt_max = max(3, min(20, n_unique))
+                top_n_trend = st.slider("상위 N개 상품", min(3, max(n_unique, 1)), _pt_max, min(5, _pt_max), key="pt_n")
+            with ctrl2:
+                metric_sel = st.selectbox("지표", ["결제금액", "결제수", "결제상품수량", "환불금액"], key="pt_metric")
+            period_sel = _auto_period
 
-        t_title_prefix = "채널명별" if sel_channels else "채널그룹별"
-        fig_tl = px.line(t_grouped, x="날짜", y=t_metric, color=t_group_key,
-                         markers=True, title=f"{t_title_prefix} {t_period} {t_metric} 추이")
-        fig_tl.update_layout(height=420, hovermode="x unified",
-                             legend=dict(orientation="h", y=-0.25), plot_bgcolor="white")
-        st.plotly_chart(fig_tl, use_container_width=True)
+            top_products = df_raw.groupby("상품명")[metric_sel].sum().nlargest(top_n_trend).index.tolist()
+            df_top = df_raw[df_raw["상품명"].isin(top_products)].copy()
 
-        col_t1, col_t2 = st.columns(2)
-        with col_t1:
-            if "채널속성" in df_t.columns:
-                attr_agg = df_t.groupby("채널속성")[t_metric].sum().reset_index()
-                fig_pie = px.pie(attr_agg, names="채널속성", values=t_metric,
-                                 title=f"채널속성별 {t_metric} 비중", hole=0.4)
+            if period_sel == "일간":
+                df_grouped = df_top.groupby(["날짜", "상품명"])[metric_sel].sum().reset_index()
+                x_fmt = "%m/%d"
+            elif period_sel == "주간":
+                df_top["_기간"] = df_top["날짜"].dt.to_period("W").dt.start_time
+                df_grouped = df_top.groupby(["_기간", "상품명"])[metric_sel].sum().reset_index().rename(columns={"_기간": "날짜"})
+                x_fmt = "%m/%d 주"
+            else:
+                df_top["_기간"] = df_top["날짜"].dt.to_period("M").dt.start_time
+                df_grouped = df_top.groupby(["_기간", "상품명"])[metric_sel].sum().reset_index().rename(columns={"_기간": "날짜"})
+                x_fmt = "%Y-%m"
+
+            df_grouped["상품명_단축"] = df_grouped["상품명"].str[:18]
+            df_grouped["순위"] = df_grouped.groupby("날짜")[metric_sel].rank(ascending=False, method="min").astype(int)
+            total_rank_order = df_grouped.groupby("상품명_단축")[metric_sel].sum().sort_values(ascending=False).index.tolist()
+
+            with st.expander("⚙️ 급락/급등 감지 상세 설정", expanded=False):
+                pt_thresh = st.slider("임계값 (직전 기간 대비 변화율 %)", 10, 80, 30, 5, key="pt_thresh",
+                                      help="이 값 이상 변화한 상품만 표시합니다. 전체 평균의 10% 미만 소량 상품은 제외.")
+                _pt_dates = sorted(df_grouped["날짜"].unique())
+                if len(_pt_dates) >= 2:
+                    _pure_fmt = x_fmt.replace(" 주", ""); _sfx = " 주" if "주" in x_fmt else ""
+                    st.caption(f"📅 비교 기간: {pd.Timestamp(_pt_dates[-2]).strftime(_pure_fmt)+_sfx} → **{pd.Timestamp(_pt_dates[-1]).strftime(_pure_fmt)+_sfx}**")
+                prod_alerts = detect_product_anomalies(df_grouped, metric_sel, pct_threshold=pt_thresh)
+                if prod_alerts:
+                    st.caption(f"직전 {period_sel} 대비 ±{pt_thresh}% 이상 변화 상품 — {len(prod_alerts)}건")
+                    _render_anomaly_cards(prod_alerts, kind="product")
+                elif len(_pt_dates) < 2:
+                    st.caption("기간이 2개 이상 있어야 감지됩니다.")
+                else:
+                    st.success(f"✅ 직전 {period_sel} 대비 ±{pt_thresh}% 이상 변화 상품 없음")
+
+            fig_line = px.line(df_grouped, x="날짜", y=metric_sel, color="상품명_단축", markers=True,
+                               custom_data=["순위", "상품명_단축"],
+                               title=f"상위 {top_n_trend}개 상품 {period_sel} {metric_sel} 추이",
+                               labels={"상품명_단축": "상품명"}, category_orders={"상품명_단축": total_rank_order})
+            fig_line.update_layout(height=460, legend=dict(orientation="h", y=-0.25, font=dict(size=11)),
+                                   xaxis_tickformat=x_fmt, hovermode="x unified", plot_bgcolor="white")
+            fig_line.update_traces(line=dict(width=2.5),
+                                   hovertemplate="%{customdata[0]}위&nbsp;&nbsp;%{customdata[1]}: %{y:,.0f}<extra></extra>")
+            st.plotly_chart(fig_line, use_container_width=True)
+
+            fig_bar_s = px.bar(df_grouped, x="날짜", y=metric_sel, color="상품명_단축", barmode="stack",
+                               title=f"상위 {top_n_trend}개 상품 {period_sel} {metric_sel} 구성",
+                               labels={"상품명_단축": "상품명"})
+            fig_bar_s.update_layout(height=380, legend=dict(orientation="h", y=-0.25, font=dict(size=11)),
+                                    xaxis_tickformat=x_fmt, plot_bgcolor="white")
+            st.plotly_chart(fig_bar_s, use_container_width=True)
+
+            pivot = df_grouped.pivot_table(index="상품명_단축", columns="날짜", values=metric_sel, aggfunc="sum").fillna(0)
+            pivot.columns = [c.strftime(x_fmt.replace(" 주", "")) if hasattr(c, "strftime") else str(c) for c in pivot.columns]
+            fig_heat = go.Figure(go.Heatmap(z=pivot.values, x=pivot.columns.tolist(), y=pivot.index.tolist(),
+                                            colorscale="Greens", hoverongaps=False,
+                                            hovertemplate="날짜: %{x}<br>상품: %{y}<br>값: %{z:,.0f}<extra></extra>"))
+            fig_heat.update_layout(title=f"상품 × 날짜 히트맵 ({metric_sel})",
+                                   height=max(300, top_n_trend * 40 + 100), margin=dict(l=180))
+            st.plotly_chart(fig_heat, use_container_width=True)
+
+            st.subheader("기간별 순위 변동")
+            pivot_rank = df_grouped.pivot_table(index="상품명_단축", columns="날짜", values=metric_sel, aggfunc="sum").fillna(0)
+            rank_df = pivot_rank.rank(ascending=False, method="min").astype(int)
+            rank_df.columns = [c.strftime(x_fmt.replace(" 주", "")) if hasattr(c, "strftime") else str(c) for c in rank_df.columns]
+            st.dataframe(rank_df, use_container_width=True)
+
+    # ── 상품 분석 ──────────────────────────────────────────────────────────────
+    with sub_product:
+        st.subheader("상품별 판매 성과")
+        if "상품명" not in df_raw.columns:
+            st.warning("상품명 컬럼이 없습니다.")
+        else:
+            pa1, pa2 = st.columns([1, 2])
+            with pa1:
+                pa_period = st.radio("기간 단위", ["전체", "일간", "주간", "월간"], horizontal=True, key="pa_period")
+
+            df_pa = df_raw.copy()
+            pa_title_suffix = "전체 기간"
+    
+            if pa_period != "전체":
+                if pa_period == "일간":
+                    avail_vals   = sorted(df_pa["날짜"].dt.date.unique(), reverse=True)
+                    avail_labels = [str(v) for v in avail_vals]
+                elif pa_period == "주간":
+                    df_pa["_p"]  = df_pa["날짜"].dt.to_period("W").dt.start_time
+                    avail_vals   = sorted(df_pa["_p"].unique(), reverse=True)
+                    avail_labels = [v.strftime("%Y-%m-%d 주") for v in avail_vals]
+                else:
+                    df_pa["_p"]  = df_pa["날짜"].dt.to_period("M").dt.start_time
+                    avail_vals   = sorted(df_pa["_p"].unique(), reverse=True)
+                    avail_labels = [v.strftime("%Y-%m") for v in avail_vals]
+    
+                with pa2:
+                    sel_label = st.selectbox("분석 기간", avail_labels, key="pa_pick")
+                sel_val = avail_vals[avail_labels.index(sel_label)]
+                pa_title_suffix = sel_label
+    
+                if pa_period == "일간":
+                    df_pa = df_pa[df_pa["날짜"].dt.date == sel_val]
+                else:
+                    df_pa = df_pa[df_pa["_p"] == sel_val]
+    
+            prod_agg = (
+                df_pa.groupby("상품명")
+                .agg(결제금액=("결제금액", "sum"), 결제수=("결제수", "sum"),
+                     환불금액=("환불금액", "sum"), 결제상품수량=("결제상품수량", "sum"))
+                .reset_index()
+                .sort_values("결제금액", ascending=False)
+            )
+            prod_agg["환불율"] = (prod_agg["환불금액"] / prod_agg["결제금액"].replace(0, np.nan) * 100).fillna(0)
+    
+            top_n = st.slider("상위 N개 상품", 5, min(30, max(len(prod_agg), 5)), 10, key="pa_topn")
+            top = prod_agg.head(top_n)
+    
+            col_a, col_b = st.columns(2)
+            with col_a:
+                fig_bar = px.bar(
+                    top, x="결제금액", y="상품명", orientation="h",
+                    title=f"상위 상품 결제금액 ({pa_title_suffix})", color="결제금액",
+                    color_continuous_scale="Greens",
+                    labels={"결제금액": "결제금액(원)", "상품명": ""},
+                )
+                fig_bar.update_layout(yaxis=dict(autorange="reversed"), height=400)
+                st.plotly_chart(fig_bar, use_container_width=True)
+    
+            with col_b:
+                fig_scatter = px.scatter(
+                    prod_agg.head(top_n * 2), x="결제수", y="환불율",
+                    size="결제금액", hover_name="상품명",
+                    title=f"결제수 vs 환불율 ({pa_title_suffix})",
+                    labels={"결제수": "결제건수", "환불율": "환불율(%)"},
+                    color="환불율", color_continuous_scale="RdYlGn_r",
+                )
+                fig_scatter.update_layout(height=400)
+                st.plotly_chart(fig_scatter, use_container_width=True)
+    
+            if "상품카테고리(대)" in df_pa.columns:
+                cat_agg = (
+                    df_pa.groupby("상품카테고리(대)")
+                    .agg(결제금액=("결제금액", "sum"))
+                    .reset_index()
+                )
+                fig_pie = px.pie(cat_agg, names="상품카테고리(대)", values="결제금액",
+                                 title=f"카테고리별 매출 비중 ({pa_title_suffix})")
                 st.plotly_chart(fig_pie, use_container_width=True)
-        with col_t2:
-            top_ch = df_t.groupby("채널명")[t_metric].sum().nlargest(10).reset_index()
-            fig_bar = px.bar(top_ch, x=t_metric, y="채널명", orientation="h",
-                             title=f"채널명 상위 10 ({t_metric})", color=t_metric,
-                             color_continuous_scale="Blues")
-            fig_bar.update_layout(yaxis=dict(autorange="reversed"), height=380)
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-        fig_stack = px.bar(t_grouped, x="날짜", y=t_metric, color=t_group_key,
-                           barmode="stack", title=f"{t_title_prefix} {t_period} {t_metric} 구성")
-        fig_stack.update_layout(height=360, legend=dict(orientation="h", y=-0.25), plot_bgcolor="white")
-        st.plotly_chart(fig_stack, use_container_width=True)
-
-        # ── 기간 비교 ──────────────────────────────────────────────────
-        st.markdown("---")
-        st.subheader("📊 기간 비교")
-        _tmin = df_traffic["날짜"].min().date()
-        _tmax = df_traffic["날짜"].max().date()
-
-        _tc_def_cur  = (max(_tmin, _tmax - timedelta(days=13)), _tmax)
-        _tc_def_prev = (max(_tmin, _tmax - timedelta(days=27)), max(_tmin, _tmax - timedelta(days=14)))
-        _tc_saved    = st.session_state.get("tc_comp_dates", (_tc_def_cur, _tc_def_prev))
-
-        with st.form(key="tc_compare_form"):
-            tc_col1, tc_col2 = st.columns(2)
-            with tc_col1:
-                tc_cur = st.date_input(
-                    "현재 기간", value=_tc_saved[0],
-                    min_value=_tmin, max_value=_tmax,
-                )
-            with tc_col2:
-                tc_prev = st.date_input(
-                    "비교 기간", value=_tc_saved[1],
-                    min_value=_tmin, max_value=_tmax,
-                )
-            if st.form_submit_button("비교하기", use_container_width=True, type="primary"):
-                st.session_state["tc_comp_dates"] = (tc_cur, tc_prev)
-
-        tc_cur_use, tc_prev_use = st.session_state.get("tc_comp_dates", (_tc_def_cur, _tc_def_prev))
-
-        if isinstance(tc_cur_use, tuple) and len(tc_cur_use) == 2 and isinstance(tc_prev_use, tuple) and len(tc_prev_use) == 2:
-            df_tc_cur  = df_t_base[(df_t_base["날짜"].dt.date >= tc_cur_use[0])  & (df_t_base["날짜"].dt.date <= tc_cur_use[1])]
-            df_tc_prev = df_t_base[(df_t_base["날짜"].dt.date >= tc_prev_use[0]) & (df_t_base["날짜"].dt.date <= tc_prev_use[1])]
-            if sel_channels:
-                df_tc_cur  = df_tc_cur[df_tc_cur["채널명"].isin(sel_channels)]
-                df_tc_prev = df_tc_prev[df_tc_prev["채널명"].isin(sel_channels)]
-
-            agg_cur  = df_tc_cur.groupby(t_group_key)[t_metric].sum().rename("현재 기간")
-            agg_prev = df_tc_prev.groupby(t_group_key)[t_metric].sum().rename("비교 기간")
-            comp_tc = pd.concat([agg_cur, agg_prev], axis=1).fillna(0).reset_index()
-            comp_tc["변화율(%)"] = (
-                (comp_tc["현재 기간"] - comp_tc["비교 기간"])
-                / comp_tc["비교 기간"].replace(0, np.nan) * 100
-            ).fillna(0)
-            comp_tc = comp_tc.sort_values("현재 기간", ascending=False)
-
-            comp_tc_m = comp_tc.melt(
-                id_vars=t_group_key, value_vars=["현재 기간", "비교 기간"],
-                var_name="기간", value_name=t_metric,
-            )
-            fig_tc_comp = px.bar(
-                comp_tc_m, x=t_group_key, y=t_metric, color="기간",
-                barmode="group",
-                title=f"{t_metric} 기간 비교  |  현재: {tc_cur_use[0]}~{tc_cur_use[1]}  /  비교: {tc_prev_use[0]}~{tc_prev_use[1]}",
-                color_discrete_map={"현재 기간": "#1565C0", "비교 기간": "#90CAF9"},
-            )
-            fig_tc_comp.update_layout(height=420, plot_bgcolor="white",
-                                      legend=dict(orientation="h", y=-0.12))
-            st.plotly_chart(fig_tc_comp, use_container_width=True)
-
-            disp_tc = comp_tc.copy()
-            disp_tc["현재 기간"] = disp_tc["현재 기간"].apply(lambda x: f"{int(x):,}")
-            disp_tc["비교 기간"] = disp_tc["비교 기간"].apply(lambda x: f"{int(x):,}")
-            disp_tc["변화율(%)"] = disp_tc["변화율(%)"].map("{:+.1f}%".format)
-            st.dataframe(disp_tc, use_container_width=True, hide_index=True)
-
-
-with tab_conversion:
-    st.subheader("채널별 전환율 & ROAS 분석")
+    
+            st.subheader("전체 상품 상세")
+            disp_prod = prod_agg.copy()
+            disp_prod["결제금액"] = disp_prod["결제금액"].apply(lambda x: f"{int(x):,}")
+            disp_prod["환불금액"] = disp_prod["환불금액"].apply(lambda x: f"{int(x):,}")
+            disp_prod["환불율"]   = disp_prod["환불율"].map("{:.1f}%".format)
+            st.dataframe(disp_prod, use_container_width=True, hide_index=True)
+with tab_channel:
     if df_traffic.empty:
-        st.info("트래픽 데이터가 없습니다.")
+        st.info("트래픽 데이터가 없습니다. Google Drive 연동을 확인하세요.")
     else:
-        cv_period = _auto_period
-        # 채널그룹 필터 (기본 표시 단위)
-        cv_all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
-        cv_sel_groups = st.multiselect("채널그룹 선택 (기본 표시 단위)", cv_all_groups, default=cv_all_groups, key="cv_groups")
+        sub_traffic, sub_cvr = st.tabs(["📺 트래픽", "🎯 전환율 & ROAS"])
 
-        # 채널명 세부 필터 (선택 시 채널명 단위로 드릴다운)
-        df_cv_base = df_traffic[df_traffic["채널그룹"].isin(cv_sel_groups)] if cv_sel_groups else df_traffic
-        cv_all_channels = sorted(df_cv_base["채널명"].dropna().unique()) if "채널명" in df_cv_base.columns else []
-        cv_sel_channels = st.multiselect(
-            "채널명 세부 필터 (선택 시 채널명 단위로 표시 / 미선택 시 채널그룹 단위)",
-            cv_all_channels, default=[], key="cv_channels"
-        )
-
-        if cv_sel_channels:
-            df_cv = df_cv_base[df_cv_base["채널명"].isin(cv_sel_channels)]
-            cv_group_key = "채널명"
-        else:
-            df_cv = df_cv_base
-            cv_group_key = "채널그룹"
-
-        def _period_col(d, p):
-            d = d.copy()
-            if p == "주간": d["_기간"] = d["날짜"].dt.to_period("W").dt.start_time
-            elif p == "월간": d["_기간"] = d["날짜"].dt.to_period("M").dt.start_time
-            else: d["_기간"] = d["날짜"]
-            return d
-
-        df_cv = _period_col(df_cv, cv_period)
-        cv_agg = df_cv.groupby(["_기간", cv_group_key]).agg(
-            유입수=("유입수", "sum"),
-            결제수=("결제수(마지막클릭)", "sum"),
-            결제금액=("결제금액(마지막클릭)", "sum"),
-            광고비=("광고비", "sum"),
-        ).reset_index().rename(columns={"_기간": "날짜"})
-        cv_agg["전환율"] = (cv_agg["결제수"] / cv_agg["유입수"].replace(0, np.nan) * 100).fillna(0)
-        cv_agg["ROAS"] = (cv_agg["결제금액"] / cv_agg["광고비"].replace(0, np.nan)).fillna(0)
-
-        # KPI (필터 적용된 데이터 기준)
-        total_visits = df_cv["유입수"].sum()
-        total_orders_cv = df_cv["결제수(마지막클릭)"].sum()
-        total_revenue_cv = df_cv["결제금액(마지막클릭)"].sum()
-        total_adspend = df_cv["광고비"].sum()
-        overall_cvr = total_orders_cv / total_visits * 100 if total_visits else 0
-        overall_roas = total_revenue_cv / total_adspend if total_adspend else 0
-
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("총 유입수", f"{int(total_visits):,}")
-        k2.metric("총 결제수", f"{int(total_orders_cv):,}")
-        k3.metric("전체 전환율", f"{overall_cvr:.2f}%")
-        k4.metric("전체 ROAS", f"{overall_roas:.1f}" if overall_roas else "N/A")
-        st.markdown("---")
-
-        # ── 전환율 급락/급등 감지 ──────────────────────────────────────
-        with st.expander("⚙️ 전환율 급락/급등 감지 상세 설정", expanded=False):
-            cvr_c1, cvr_c2, cvr_c3 = st.columns(3)
-            with cvr_c1:
-                cvr_min_v = st.number_input(
-                    "최소 유입수", min_value=10, max_value=10000, value=100, step=10, key="cvr_min_v",
-                    help="유입수가 이 값 미만인 채널은 노이즈로 보고 제외합니다.",
-                )
-            with cvr_c2:
-                cvr_abs_t = st.number_input(
-                    "절대 변화 기준 (%p)", min_value=0.1, max_value=10.0, value=1.0, step=0.1,
-                    key="cvr_abs_t", help="전환율이 이 값(%p) 이상 변해야 표시합니다.",
-                )
-            with cvr_c3:
-                cvr_rel_t = st.slider(
-                    "상대 변화 기준 (%)", 10, 80, 25, 5, key="cvr_rel_t",
-                    help="두 조건(절대 + 상대)을 모두 만족해야 표시합니다.",
-                )
-            _cv_dates = sorted(cv_agg["날짜"].unique())
-            if len(_cv_dates) >= 2:
-                _cv_fmt    = {"일간": "%m/%d", "주간": "%m/%d", "월간": "%Y-%m"}.get(cv_period, "%Y-%m-%d")
-                _cv_suffix = " 주" if cv_period == "주간" else ""
-                _cv_prev   = pd.Timestamp(_cv_dates[-2]).strftime(_cv_fmt) + _cv_suffix
-                _cv_cur    = pd.Timestamp(_cv_dates[-1]).strftime(_cv_fmt) + _cv_suffix
-                st.caption(f"📅 비교 기간: {_cv_prev} (직전) → **{_cv_cur}** (현재)")
-            cvr_alerts = detect_cvr_anomalies(
-                cv_agg, cv_group_key,
-                pct_threshold=float(cvr_rel_t),
-                abs_threshold=float(cvr_abs_t),
-                min_visits=int(cvr_min_v),
-            )
-            if cvr_alerts:
-                st.caption(
-                    f"직전 {cv_period} 대비 전환율 절대 {cvr_abs_t}%p 이상 & 상대 {cvr_rel_t}% 이상 변화 — {len(cvr_alerts)}건"
-                )
-                _render_anomaly_cards(cvr_alerts, kind="cvr")
-            elif len(_cv_dates) < 2:
-                st.caption("기간이 2개 이상 있어야 감지됩니다.")
+        with sub_traffic:
+            st.subheader("채널별 트래픽 추이")
+            if df_traffic.empty:
+                st.info("트래픽 데이터가 없습니다. 사이드바에서 트래픽 데이터 폴더를 설정하거나 Google Drive 연동을 확인하세요.")
             else:
-                st.success("✅ 설정 기준 이상의 전환율 변화 채널 없음")
-        st.markdown("---")
-
-        cv_title_prefix = "채널명별" if cv_sel_channels else "채널그룹별"
-        col_c1, col_c2 = st.columns(2)
-        with col_c1:
-            fig_cvr = px.line(cv_agg, x="날짜", y="전환율", color=cv_group_key,
-                              markers=True, title=f"{cv_title_prefix} {cv_period} 전환율(%)")
-            fig_cvr.update_layout(height=380, hovermode="x unified", plot_bgcolor="white",
-                                  legend=dict(orientation="h", y=-0.3))
-            st.plotly_chart(fig_cvr, use_container_width=True)
-        with col_c2:
-            cv_roas = cv_agg[cv_agg["ROAS"] > 0]
-            fig_roas = px.line(cv_roas, x="날짜", y="ROAS", color=cv_group_key,
-                               markers=True, title=f"{cv_title_prefix} {cv_period} ROAS")
-            fig_roas.update_layout(height=380, hovermode="x unified", plot_bgcolor="white",
-                                   legend=dict(orientation="h", y=-0.3))
-            st.plotly_chart(fig_roas, use_container_width=True)
-
-        # 버블차트: 항상 채널명 레벨
-        ch_agg = df_cv.groupby(["채널명", "채널그룹"]).agg(
-            유입수=("유입수", "sum"),
-            결제수=("결제수(마지막클릭)", "sum"),
-            결제금액=("결제금액(마지막클릭)", "sum"),
-            광고비=("광고비", "sum"),
-        ).reset_index()
-        ch_agg["전환율"] = (ch_agg["결제수"] / ch_agg["유입수"].replace(0, np.nan) * 100).fillna(0)
-        ch_agg["ROAS"] = (ch_agg["결제금액"] / ch_agg["광고비"].replace(0, np.nan)).fillna(0)
-        ch_agg["채널명_단축"] = ch_agg["채널명"].str[:15]
-
-        fig_bubble = px.scatter(
-            ch_agg, x="유입수", y="전환율", size="결제금액",
-            color="채널그룹", hover_name="채널명",
-            title="채널별 유입수 vs 전환율 (버블 크기 = 결제금액)",
-            labels={"유입수": "유입수", "전환율": "전환율(%)"},
-        )
-        fig_bubble.update_layout(height=440)
-        st.plotly_chart(fig_bubble, use_container_width=True)
-
-        ch_paid = ch_agg[ch_agg["광고비"] > 0].nlargest(15, "유입수")
-        if not ch_paid.empty:
-            fig_adrev = go.Figure()
-            fig_adrev.add_bar(x=ch_paid["채널명_단축"], y=ch_paid["광고비"], name="광고비", marker_color="#f44336")
-            fig_adrev.add_bar(x=ch_paid["채널명_단축"], y=ch_paid["결제금액"], name="결제금액", marker_color="#4CAF50")
-            fig_adrev.update_layout(barmode="group", title="채널별 광고비 vs 결제금액",
-                                    height=380, plot_bgcolor="white",
-                                    legend=dict(orientation="h"))
-            st.plotly_chart(fig_adrev, use_container_width=True)
-
-        # ── 기간 비교 ──────────────────────────────────────────────────
-        st.markdown("---")
-        st.subheader("📊 기간 비교")
-        _cvtmin = df_traffic["날짜"].min().date()
-        _cvtmax = df_traffic["날짜"].max().date()
-
-        _cv_def_cur  = (max(_cvtmin, _cvtmax - timedelta(days=13)), _cvtmax)
-        _cv_def_prev = (max(_cvtmin, _cvtmax - timedelta(days=27)), max(_cvtmin, _cvtmax - timedelta(days=14)))
-        _cv_saved    = st.session_state.get("cv_comp_dates", (_cv_def_cur, _cv_def_prev))
-
-        with st.form(key="cv_compare_form"):
-            cv_cc1, cv_cc2 = st.columns(2)
-            with cv_cc1:
-                cv_comp_cur = st.date_input(
-                    "현재 기간", value=_cv_saved[0],
-                    min_value=_cvtmin, max_value=_cvtmax,
+                TRAFFIC_COLS = {
+                    "유입수": "유입수", "고객수": "고객수", "광고비": "광고비", "페이지수": "페이지수",
+                }
+                t_metric = st.selectbox("지표", list(TRAFFIC_COLS.keys()), key="tc_metric")
+                t_period = _auto_period
+    
+                # 채널그룹 필터 (기본 표시 단위)
+                all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
+                sel_groups = st.multiselect("채널그룹 선택 (기본 표시 단위)", all_groups, default=all_groups, key="tc_groups")
+    
+                # 채널명 세부 필터 (선택 시 채널명 단위로 드릴다운)
+                df_t_base = df_traffic[df_traffic["채널그룹"].isin(sel_groups)] if sel_groups else df_traffic
+                all_channels = sorted(df_t_base["채널명"].dropna().unique()) if "채널명" in df_t_base.columns else []
+                sel_channels = st.multiselect(
+                    "채널명 세부 필터 (선택 시 채널명 단위로 표시 / 미선택 시 채널그룹 단위)",
+                    all_channels, default=[], key="tc_channels"
                 )
-            with cv_cc2:
-                cv_comp_prev = st.date_input(
-                    "비교 기간", value=_cv_saved[1],
-                    min_value=_cvtmin, max_value=_cvtmax,
+    
+                # 그룹 키 및 적용 데이터 결정
+                if sel_channels:
+                    df_t = df_t_base[df_t_base["채널명"].isin(sel_channels)]
+                    t_group_key = "채널명"
+                else:
+                    df_t = df_t_base
+                    t_group_key = "채널그룹"
+    
+                if t_period == "일간":
+                    t_grouped = df_t.groupby(["날짜", t_group_key])[t_metric].sum().reset_index()
+                elif t_period == "주간":
+                    df_t = df_t.copy(); df_t["_기간"] = df_t["날짜"].dt.to_period("W").dt.start_time
+                    t_grouped = df_t.groupby(["_기간", t_group_key])[t_metric].sum().reset_index().rename(columns={"_기간": "날짜"})
+                else:
+                    df_t = df_t.copy(); df_t["_기간"] = df_t["날짜"].dt.to_period("M").dt.start_time
+                    t_grouped = df_t.groupby(["_기간", t_group_key])[t_metric].sum().reset_index().rename(columns={"_기간": "날짜"})
+    
+                t_title_prefix = "채널명별" if sel_channels else "채널그룹별"
+                fig_tl = px.line(t_grouped, x="날짜", y=t_metric, color=t_group_key,
+                                 markers=True, title=f"{t_title_prefix} {t_period} {t_metric} 추이")
+                fig_tl.update_layout(height=420, hovermode="x unified",
+                                     legend=dict(orientation="h", y=-0.25), plot_bgcolor="white")
+                st.plotly_chart(fig_tl, use_container_width=True)
+    
+                col_t1, col_t2 = st.columns(2)
+                with col_t1:
+                    if "채널속성" in df_t.columns:
+                        attr_agg = df_t.groupby("채널속성")[t_metric].sum().reset_index()
+                        fig_pie = px.pie(attr_agg, names="채널속성", values=t_metric,
+                                         title=f"채널속성별 {t_metric} 비중", hole=0.4)
+                        st.plotly_chart(fig_pie, use_container_width=True)
+                with col_t2:
+                    top_ch = df_t.groupby("채널명")[t_metric].sum().nlargest(10).reset_index()
+                    fig_bar = px.bar(top_ch, x=t_metric, y="채널명", orientation="h",
+                                     title=f"채널명 상위 10 ({t_metric})", color=t_metric,
+                                     color_continuous_scale="Blues")
+                    fig_bar.update_layout(yaxis=dict(autorange="reversed"), height=380)
+                    st.plotly_chart(fig_bar, use_container_width=True)
+    
+                fig_stack = px.bar(t_grouped, x="날짜", y=t_metric, color=t_group_key,
+                                   barmode="stack", title=f"{t_title_prefix} {t_period} {t_metric} 구성")
+                fig_stack.update_layout(height=360, legend=dict(orientation="h", y=-0.25), plot_bgcolor="white")
+                st.plotly_chart(fig_stack, use_container_width=True)
+    
+                # ── 기간 비교 ──────────────────────────────────────────────────
+                st.markdown("---")
+                st.subheader("📊 기간 비교")
+                _tmin = df_traffic["날짜"].min().date()
+                _tmax = df_traffic["날짜"].max().date()
+    
+                _tc_def_cur  = (max(_tmin, _tmax - timedelta(days=13)), _tmax)
+                _tc_def_prev = (max(_tmin, _tmax - timedelta(days=27)), max(_tmin, _tmax - timedelta(days=14)))
+                _tc_saved    = st.session_state.get("tc_comp_dates", (_tc_def_cur, _tc_def_prev))
+    
+                with st.form(key="tc_compare_form"):
+                    tc_col1, tc_col2 = st.columns(2)
+                    with tc_col1:
+                        tc_cur = st.date_input(
+                            "현재 기간", value=_tc_saved[0],
+                            min_value=_tmin, max_value=_tmax,
+                        )
+                    with tc_col2:
+                        tc_prev = st.date_input(
+                            "비교 기간", value=_tc_saved[1],
+                            min_value=_tmin, max_value=_tmax,
+                        )
+                    if st.form_submit_button("비교하기", use_container_width=True, type="primary"):
+                        st.session_state["tc_comp_dates"] = (tc_cur, tc_prev)
+    
+                tc_cur_use, tc_prev_use = st.session_state.get("tc_comp_dates", (_tc_def_cur, _tc_def_prev))
+    
+                if isinstance(tc_cur_use, tuple) and len(tc_cur_use) == 2 and isinstance(tc_prev_use, tuple) and len(tc_prev_use) == 2:
+                    df_tc_cur  = df_t_base[(df_t_base["날짜"].dt.date >= tc_cur_use[0])  & (df_t_base["날짜"].dt.date <= tc_cur_use[1])]
+                    df_tc_prev = df_t_base[(df_t_base["날짜"].dt.date >= tc_prev_use[0]) & (df_t_base["날짜"].dt.date <= tc_prev_use[1])]
+                    if sel_channels:
+                        df_tc_cur  = df_tc_cur[df_tc_cur["채널명"].isin(sel_channels)]
+                        df_tc_prev = df_tc_prev[df_tc_prev["채널명"].isin(sel_channels)]
+    
+                    agg_cur  = df_tc_cur.groupby(t_group_key)[t_metric].sum().rename("현재 기간")
+                    agg_prev = df_tc_prev.groupby(t_group_key)[t_metric].sum().rename("비교 기간")
+                    comp_tc = pd.concat([agg_cur, agg_prev], axis=1).fillna(0).reset_index()
+                    comp_tc["변화율(%)"] = (
+                        (comp_tc["현재 기간"] - comp_tc["비교 기간"])
+                        / comp_tc["비교 기간"].replace(0, np.nan) * 100
+                    ).fillna(0)
+                    comp_tc = comp_tc.sort_values("현재 기간", ascending=False)
+    
+                    comp_tc_m = comp_tc.melt(
+                        id_vars=t_group_key, value_vars=["현재 기간", "비교 기간"],
+                        var_name="기간", value_name=t_metric,
+                    )
+                    fig_tc_comp = px.bar(
+                        comp_tc_m, x=t_group_key, y=t_metric, color="기간",
+                        barmode="group",
+                        title=f"{t_metric} 기간 비교  |  현재: {tc_cur_use[0]}~{tc_cur_use[1]}  /  비교: {tc_prev_use[0]}~{tc_prev_use[1]}",
+                        color_discrete_map={"현재 기간": "#1565C0", "비교 기간": "#90CAF9"},
+                    )
+                    fig_tc_comp.update_layout(height=420, plot_bgcolor="white",
+                                              legend=dict(orientation="h", y=-0.12))
+                    st.plotly_chart(fig_tc_comp, use_container_width=True)
+    
+                    disp_tc = comp_tc.copy()
+                    disp_tc["현재 기간"] = disp_tc["현재 기간"].apply(lambda x: f"{int(x):,}")
+                    disp_tc["비교 기간"] = disp_tc["비교 기간"].apply(lambda x: f"{int(x):,}")
+                    disp_tc["변화율(%)"] = disp_tc["변화율(%)"].map("{:+.1f}%".format)
+                    st.dataframe(disp_tc, use_container_width=True, hide_index=True)
+    
+    
+
+        with sub_cvr:
+            st.subheader("채널별 전환율 & ROAS 분석")
+            if df_traffic.empty:
+                st.info("트래픽 데이터가 없습니다.")
+            else:
+                cv_period = _auto_period
+                # 채널그룹 필터 (기본 표시 단위)
+                cv_all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
+                cv_sel_groups = st.multiselect("채널그룹 선택 (기본 표시 단위)", cv_all_groups, default=cv_all_groups, key="cv_groups")
+    
+                # 채널명 세부 필터 (선택 시 채널명 단위로 드릴다운)
+                df_cv_base = df_traffic[df_traffic["채널그룹"].isin(cv_sel_groups)] if cv_sel_groups else df_traffic
+                cv_all_channels = sorted(df_cv_base["채널명"].dropna().unique()) if "채널명" in df_cv_base.columns else []
+                cv_sel_channels = st.multiselect(
+                    "채널명 세부 필터 (선택 시 채널명 단위로 표시 / 미선택 시 채널그룹 단위)",
+                    cv_all_channels, default=[], key="cv_channels"
                 )
-            if st.form_submit_button("비교하기", use_container_width=True, type="primary"):
-                st.session_state["cv_comp_dates"] = (cv_comp_cur, cv_comp_prev)
-
-        cv_comp_cur_use, cv_comp_prev_use = st.session_state.get("cv_comp_dates", (_cv_def_cur, _cv_def_prev))
-
-        if isinstance(cv_comp_cur_use, tuple) and len(cv_comp_cur_use) == 2 and isinstance(cv_comp_prev_use, tuple) and len(cv_comp_prev_use) == 2:
-            df_cc = df_cv_base[(df_cv_base["날짜"].dt.date >= cv_comp_cur_use[0])  & (df_cv_base["날짜"].dt.date <= cv_comp_cur_use[1])]
-            df_cp = df_cv_base[(df_cv_base["날짜"].dt.date >= cv_comp_prev_use[0]) & (df_cv_base["날짜"].dt.date <= cv_comp_prev_use[1])]
-            if cv_sel_channels:
-                df_cc = df_cc[df_cc["채널명"].isin(cv_sel_channels)]
-                df_cp = df_cp[df_cp["채널명"].isin(cv_sel_channels)]
-
-            def _agg_comp(df, gk):
-                a = df.groupby(gk).agg(
+    
+                if cv_sel_channels:
+                    df_cv = df_cv_base[df_cv_base["채널명"].isin(cv_sel_channels)]
+                    cv_group_key = "채널명"
+                else:
+                    df_cv = df_cv_base
+                    cv_group_key = "채널그룹"
+    
+                def _period_col(d, p):
+                    d = d.copy()
+                    if p == "주간": d["_기간"] = d["날짜"].dt.to_period("W").dt.start_time
+                    elif p == "월간": d["_기간"] = d["날짜"].dt.to_period("M").dt.start_time
+                    else: d["_기간"] = d["날짜"]
+                    return d
+    
+                df_cv = _period_col(df_cv, cv_period)
+                cv_agg = df_cv.groupby(["_기간", cv_group_key]).agg(
+                    유입수=("유입수", "sum"),
+                    결제수=("결제수(마지막클릭)", "sum"),
+                    결제금액=("결제금액(마지막클릭)", "sum"),
+                    광고비=("광고비", "sum"),
+                ).reset_index().rename(columns={"_기간": "날짜"})
+                cv_agg["전환율"] = (cv_agg["결제수"] / cv_agg["유입수"].replace(0, np.nan) * 100).fillna(0)
+                cv_agg["ROAS"] = (cv_agg["결제금액"] / cv_agg["광고비"].replace(0, np.nan)).fillna(0)
+    
+                # KPI (필터 적용된 데이터 기준)
+                total_visits = df_cv["유입수"].sum()
+                total_orders_cv = df_cv["결제수(마지막클릭)"].sum()
+                total_revenue_cv = df_cv["결제금액(마지막클릭)"].sum()
+                total_adspend = df_cv["광고비"].sum()
+                overall_cvr = total_orders_cv / total_visits * 100 if total_visits else 0
+                overall_roas = total_revenue_cv / total_adspend if total_adspend else 0
+    
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("총 유입수", f"{int(total_visits):,}")
+                k2.metric("총 결제수", f"{int(total_orders_cv):,}")
+                k3.metric("전체 전환율", f"{overall_cvr:.2f}%")
+                k4.metric("전체 ROAS", f"{overall_roas:.1f}" if overall_roas else "N/A")
+                st.markdown("---")
+    
+                # ── 전환율 급락/급등 감지 ──────────────────────────────────────
+                with st.expander("⚙️ 전환율 급락/급등 감지 상세 설정", expanded=False):
+                    cvr_c1, cvr_c2, cvr_c3 = st.columns(3)
+                    with cvr_c1:
+                        cvr_min_v = st.number_input(
+                            "최소 유입수", min_value=10, max_value=10000, value=100, step=10, key="cvr_min_v",
+                            help="유입수가 이 값 미만인 채널은 노이즈로 보고 제외합니다.",
+                        )
+                    with cvr_c2:
+                        cvr_abs_t = st.number_input(
+                            "절대 변화 기준 (%p)", min_value=0.1, max_value=10.0, value=1.0, step=0.1,
+                            key="cvr_abs_t", help="전환율이 이 값(%p) 이상 변해야 표시합니다.",
+                        )
+                    with cvr_c3:
+                        cvr_rel_t = st.slider(
+                            "상대 변화 기준 (%)", 10, 80, 25, 5, key="cvr_rel_t",
+                            help="두 조건(절대 + 상대)을 모두 만족해야 표시합니다.",
+                        )
+                    _cv_dates = sorted(cv_agg["날짜"].unique())
+                    if len(_cv_dates) >= 2:
+                        _cv_fmt    = {"일간": "%m/%d", "주간": "%m/%d", "월간": "%Y-%m"}.get(cv_period, "%Y-%m-%d")
+                        _cv_suffix = " 주" if cv_period == "주간" else ""
+                        _cv_prev   = pd.Timestamp(_cv_dates[-2]).strftime(_cv_fmt) + _cv_suffix
+                        _cv_cur    = pd.Timestamp(_cv_dates[-1]).strftime(_cv_fmt) + _cv_suffix
+                        st.caption(f"📅 비교 기간: {_cv_prev} (직전) → **{_cv_cur}** (현재)")
+                    cvr_alerts = detect_cvr_anomalies(
+                        cv_agg, cv_group_key,
+                        pct_threshold=float(cvr_rel_t),
+                        abs_threshold=float(cvr_abs_t),
+                        min_visits=int(cvr_min_v),
+                    )
+                    if cvr_alerts:
+                        st.caption(
+                            f"직전 {cv_period} 대비 전환율 절대 {cvr_abs_t}%p 이상 & 상대 {cvr_rel_t}% 이상 변화 — {len(cvr_alerts)}건"
+                        )
+                        _render_anomaly_cards(cvr_alerts, kind="cvr")
+                    elif len(_cv_dates) < 2:
+                        st.caption("기간이 2개 이상 있어야 감지됩니다.")
+                    else:
+                        st.success("✅ 설정 기준 이상의 전환율 변화 채널 없음")
+                st.markdown("---")
+    
+                cv_title_prefix = "채널명별" if cv_sel_channels else "채널그룹별"
+                col_c1, col_c2 = st.columns(2)
+                with col_c1:
+                    fig_cvr = px.line(cv_agg, x="날짜", y="전환율", color=cv_group_key,
+                                      markers=True, title=f"{cv_title_prefix} {cv_period} 전환율(%)")
+                    fig_cvr.update_layout(height=380, hovermode="x unified", plot_bgcolor="white",
+                                          legend=dict(orientation="h", y=-0.3))
+                    st.plotly_chart(fig_cvr, use_container_width=True)
+                with col_c2:
+                    cv_roas = cv_agg[cv_agg["ROAS"] > 0]
+                    fig_roas = px.line(cv_roas, x="날짜", y="ROAS", color=cv_group_key,
+                                       markers=True, title=f"{cv_title_prefix} {cv_period} ROAS")
+                    fig_roas.update_layout(height=380, hovermode="x unified", plot_bgcolor="white",
+                                           legend=dict(orientation="h", y=-0.3))
+                    st.plotly_chart(fig_roas, use_container_width=True)
+    
+                # 버블차트: 항상 채널명 레벨
+                ch_agg = df_cv.groupby(["채널명", "채널그룹"]).agg(
                     유입수=("유입수", "sum"),
                     결제수=("결제수(마지막클릭)", "sum"),
                     결제금액=("결제금액(마지막클릭)", "sum"),
                     광고비=("광고비", "sum"),
                 ).reset_index()
-                a["전환율"] = (a["결제수"] / a["유입수"].replace(0, np.nan) * 100).fillna(0)
-                a["ROAS"]  = (a["결제금액"] / a["광고비"].replace(0, np.nan)).fillna(0)
-                return a
-
-            agg_cc = _agg_comp(df_cc, cv_group_key)
-            agg_cp = _agg_comp(df_cp, cv_group_key)
-            merged = agg_cc.merge(agg_cp, on=cv_group_key, suffixes=("_현재", "_비교"), how="outer").fillna(0)
-            for _col in ["전환율", "ROAS", "유입수", "결제금액"]:
-                merged[f"{_col}_변화율"] = (
-                    (merged[f"{_col}_현재"] - merged[f"{_col}_비교"])
-                    / merged[f"{_col}_비교"].replace(0, np.nan) * 100
-                ).fillna(0)
-            merged = merged.sort_values("유입수_현재", ascending=False)
-
-            # 전환율 & ROAS 비교 묶음 막대
-            cv_chart_cols = st.columns(2)
-            with cv_chart_cols[0]:
-                cvr_m = merged[[cv_group_key, "전환율_현재", "전환율_비교"]].melt(
-                    id_vars=cv_group_key, value_vars=["전환율_현재", "전환율_비교"],
-                    var_name="기간", value_name="전환율(%)",
+                ch_agg["전환율"] = (ch_agg["결제수"] / ch_agg["유입수"].replace(0, np.nan) * 100).fillna(0)
+                ch_agg["ROAS"] = (ch_agg["결제금액"] / ch_agg["광고비"].replace(0, np.nan)).fillna(0)
+                ch_agg["채널명_단축"] = ch_agg["채널명"].str[:15]
+    
+                fig_bubble = px.scatter(
+                    ch_agg, x="유입수", y="전환율", size="결제금액",
+                    color="채널그룹", hover_name="채널명",
+                    title="채널별 유입수 vs 전환율 (버블 크기 = 결제금액)",
+                    labels={"유입수": "유입수", "전환율": "전환율(%)"},
                 )
-                cvr_m["기간"] = cvr_m["기간"].map({"전환율_현재": "현재 기간", "전환율_비교": "비교 기간"})
-                fig_cvr_c = px.bar(
-                    cvr_m, x=cv_group_key, y="전환율(%)", color="기간",
-                    barmode="group",
-                    title=f"전환율 비교  |  현재: {cv_comp_cur_use[0]}~{cv_comp_cur_use[1]}  /  비교: {cv_comp_prev_use[0]}~{cv_comp_prev_use[1]}",
-                    color_discrete_map={"현재 기간": "#2E7D32", "비교 기간": "#A5D6A7"},
-                )
-                fig_cvr_c.update_layout(height=380, plot_bgcolor="white",
-                                        legend=dict(orientation="h", y=-0.15))
-                st.plotly_chart(fig_cvr_c, use_container_width=True)
+                fig_bubble.update_layout(height=440)
+                st.plotly_chart(fig_bubble, use_container_width=True)
+    
+                ch_paid = ch_agg[ch_agg["광고비"] > 0].nlargest(15, "유입수")
+                if not ch_paid.empty:
+                    fig_adrev = go.Figure()
+                    fig_adrev.add_bar(x=ch_paid["채널명_단축"], y=ch_paid["광고비"], name="광고비", marker_color="#f44336")
+                    fig_adrev.add_bar(x=ch_paid["채널명_단축"], y=ch_paid["결제금액"], name="결제금액", marker_color="#4CAF50")
+                    fig_adrev.update_layout(barmode="group", title="채널별 광고비 vs 결제금액",
+                                            height=380, plot_bgcolor="white",
+                                            legend=dict(orientation="h"))
+                    st.plotly_chart(fig_adrev, use_container_width=True)
+    
+                # ── 기간 비교 ──────────────────────────────────────────────────
+                st.markdown("---")
+                st.subheader("📊 기간 비교")
+                _cvtmin = df_traffic["날짜"].min().date()
+                _cvtmax = df_traffic["날짜"].max().date()
+    
+                _cv_def_cur  = (max(_cvtmin, _cvtmax - timedelta(days=13)), _cvtmax)
+                _cv_def_prev = (max(_cvtmin, _cvtmax - timedelta(days=27)), max(_cvtmin, _cvtmax - timedelta(days=14)))
+                _cv_saved    = st.session_state.get("cv_comp_dates", (_cv_def_cur, _cv_def_prev))
+    
+                with st.form(key="cv_compare_form"):
+                    cv_cc1, cv_cc2 = st.columns(2)
+                    with cv_cc1:
+                        cv_comp_cur = st.date_input(
+                            "현재 기간", value=_cv_saved[0],
+                            min_value=_cvtmin, max_value=_cvtmax,
+                        )
+                    with cv_cc2:
+                        cv_comp_prev = st.date_input(
+                            "비교 기간", value=_cv_saved[1],
+                            min_value=_cvtmin, max_value=_cvtmax,
+                        )
+                    if st.form_submit_button("비교하기", use_container_width=True, type="primary"):
+                        st.session_state["cv_comp_dates"] = (cv_comp_cur, cv_comp_prev)
+    
+                cv_comp_cur_use, cv_comp_prev_use = st.session_state.get("cv_comp_dates", (_cv_def_cur, _cv_def_prev))
+    
+                if isinstance(cv_comp_cur_use, tuple) and len(cv_comp_cur_use) == 2 and isinstance(cv_comp_prev_use, tuple) and len(cv_comp_prev_use) == 2:
+                    df_cc = df_cv_base[(df_cv_base["날짜"].dt.date >= cv_comp_cur_use[0])  & (df_cv_base["날짜"].dt.date <= cv_comp_cur_use[1])]
+                    df_cp = df_cv_base[(df_cv_base["날짜"].dt.date >= cv_comp_prev_use[0]) & (df_cv_base["날짜"].dt.date <= cv_comp_prev_use[1])]
+                    if cv_sel_channels:
+                        df_cc = df_cc[df_cc["채널명"].isin(cv_sel_channels)]
+                        df_cp = df_cp[df_cp["채널명"].isin(cv_sel_channels)]
+    
+                    def _agg_comp(df, gk):
+                        a = df.groupby(gk).agg(
+                            유입수=("유입수", "sum"),
+                            결제수=("결제수(마지막클릭)", "sum"),
+                            결제금액=("결제금액(마지막클릭)", "sum"),
+                            광고비=("광고비", "sum"),
+                        ).reset_index()
+                        a["전환율"] = (a["결제수"] / a["유입수"].replace(0, np.nan) * 100).fillna(0)
+                        a["ROAS"]  = (a["결제금액"] / a["광고비"].replace(0, np.nan)).fillna(0)
+                        return a
+    
+                    agg_cc = _agg_comp(df_cc, cv_group_key)
+                    agg_cp = _agg_comp(df_cp, cv_group_key)
+                    merged = agg_cc.merge(agg_cp, on=cv_group_key, suffixes=("_현재", "_비교"), how="outer").fillna(0)
+                    for _col in ["전환율", "ROAS", "유입수", "결제금액"]:
+                        merged[f"{_col}_변화율"] = (
+                            (merged[f"{_col}_현재"] - merged[f"{_col}_비교"])
+                            / merged[f"{_col}_비교"].replace(0, np.nan) * 100
+                        ).fillna(0)
+                    merged = merged.sort_values("유입수_현재", ascending=False)
+    
+                    # 전환율 & ROAS 비교 묶음 막대
+                    cv_chart_cols = st.columns(2)
+                    with cv_chart_cols[0]:
+                        cvr_m = merged[[cv_group_key, "전환율_현재", "전환율_비교"]].melt(
+                            id_vars=cv_group_key, value_vars=["전환율_현재", "전환율_비교"],
+                            var_name="기간", value_name="전환율(%)",
+                        )
+                        cvr_m["기간"] = cvr_m["기간"].map({"전환율_현재": "현재 기간", "전환율_비교": "비교 기간"})
+                        fig_cvr_c = px.bar(
+                            cvr_m, x=cv_group_key, y="전환율(%)", color="기간",
+                            barmode="group",
+                            title=f"전환율 비교  |  현재: {cv_comp_cur_use[0]}~{cv_comp_cur_use[1]}  /  비교: {cv_comp_prev_use[0]}~{cv_comp_prev_use[1]}",
+                            color_discrete_map={"현재 기간": "#2E7D32", "비교 기간": "#A5D6A7"},
+                        )
+                        fig_cvr_c.update_layout(height=380, plot_bgcolor="white",
+                                                legend=dict(orientation="h", y=-0.15))
+                        st.plotly_chart(fig_cvr_c, use_container_width=True)
+    
+                    with cv_chart_cols[1]:
+                        roas_m = merged[[cv_group_key, "ROAS_현재", "ROAS_비교"]].melt(
+                            id_vars=cv_group_key, value_vars=["ROAS_현재", "ROAS_비교"],
+                            var_name="기간", value_name="ROAS",
+                        )
+                        roas_m["기간"] = roas_m["기간"].map({"ROAS_현재": "현재 기간", "ROAS_비교": "비교 기간"})
+                        roas_m = roas_m[roas_m["ROAS"] > 0]
+                        if not roas_m.empty:
+                            fig_roas_c = px.bar(
+                                roas_m, x=cv_group_key, y="ROAS", color="기간",
+                                barmode="group", title="ROAS 비교",
+                                color_discrete_map={"현재 기간": "#E65100", "비교 기간": "#FFCC80"},
+                            )
+                            fig_roas_c.update_layout(height=380, plot_bgcolor="white",
+                                                    legend=dict(orientation="h", y=-0.15))
+                            st.plotly_chart(fig_roas_c, use_container_width=True)
+    
+                    # 채널별 증감 테이블
+                    st.subheader("채널별 지표 증감")
+                    _dcols = [cv_group_key,
+                              "유입수_현재", "유입수_비교", "유입수_변화율",
+                              "전환율_현재", "전환율_비교", "전환율_변화율",
+                              "ROAS_현재", "ROAS_비교", "ROAS_변화율"]
+                    disp_m = merged[[c for c in _dcols if c in merged.columns]].copy()
+                    for c in ["유입수_현재", "유입수_비교"]:
+                        if c in disp_m: disp_m[c] = disp_m[c].apply(lambda x: f"{int(x):,}")
+                    for c in ["전환율_현재", "전환율_비교"]:
+                        if c in disp_m: disp_m[c] = disp_m[c].map("{:.2f}%".format)
+                    for c in ["ROAS_현재", "ROAS_비교"]:
+                        if c in disp_m: disp_m[c] = disp_m[c].map("{:.1f}".format)
+                    for c in ["유입수_변화율", "전환율_변화율", "ROAS_변화율"]:
+                        if c in disp_m: disp_m[c] = disp_m[c].map("{:+.1f}%".format)
+                    st.dataframe(disp_m, use_container_width=True, hide_index=True)
 
-            with cv_chart_cols[1]:
-                roas_m = merged[[cv_group_key, "ROAS_현재", "ROAS_비교"]].melt(
-                    id_vars=cv_group_key, value_vars=["ROAS_현재", "ROAS_비교"],
-                    var_name="기간", value_name="ROAS",
-                )
-                roas_m["기간"] = roas_m["기간"].map({"ROAS_현재": "현재 기간", "ROAS_비교": "비교 기간"})
-                roas_m = roas_m[roas_m["ROAS"] > 0]
-                if not roas_m.empty:
-                    fig_roas_c = px.bar(
-                        roas_m, x=cv_group_key, y="ROAS", color="기간",
-                        barmode="group", title="ROAS 비교",
-                        color_discrete_map={"현재 기간": "#E65100", "비교 기간": "#FFCC80"},
-                    )
-                    fig_roas_c.update_layout(height=380, plot_bgcolor="white",
-                                            legend=dict(orientation="h", y=-0.15))
-                    st.plotly_chart(fig_roas_c, use_container_width=True)
-
-            # 채널별 증감 테이블
-            st.subheader("채널별 지표 증감")
-            _dcols = [cv_group_key,
-                      "유입수_현재", "유입수_비교", "유입수_변화율",
-                      "전환율_현재", "전환율_비교", "전환율_변화율",
-                      "ROAS_현재", "ROAS_비교", "ROAS_변화율"]
-            disp_m = merged[[c for c in _dcols if c in merged.columns]].copy()
-            for c in ["유입수_현재", "유입수_비교"]:
-                if c in disp_m: disp_m[c] = disp_m[c].apply(lambda x: f"{int(x):,}")
-            for c in ["전환율_현재", "전환율_비교"]:
-                if c in disp_m: disp_m[c] = disp_m[c].map("{:.2f}%".format)
-            for c in ["ROAS_현재", "ROAS_비교"]:
-                if c in disp_m: disp_m[c] = disp_m[c].map("{:.1f}".format)
-            for c in ["유입수_변화율", "전환율_변화율", "ROAS_변화율"]:
-                if c in disp_m: disp_m[c] = disp_m[c].map("{:+.1f}%".format)
-            st.dataframe(disp_m, use_container_width=True, hide_index=True)
 
 
 with tab_insight:
