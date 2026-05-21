@@ -1069,6 +1069,61 @@ with tab_traffic:
         fig_stack.update_layout(height=360, legend=dict(orientation="h", y=-0.25), plot_bgcolor="white")
         st.plotly_chart(fig_stack, use_container_width=True)
 
+        # ── 기간 비교 ──────────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("📊 기간 비교")
+        _tmin = df_traffic["날짜"].min().date()
+        _tmax = df_traffic["날짜"].max().date()
+        tc_col1, tc_col2 = st.columns(2)
+        with tc_col1:
+            tc_cur = st.date_input(
+                "현재 기간",
+                value=(max(_tmin, _tmax - timedelta(days=13)), _tmax),
+                min_value=_tmin, max_value=_tmax, key="tc_cur",
+            )
+        with tc_col2:
+            tc_prev = st.date_input(
+                "비교 기간",
+                value=(max(_tmin, _tmax - timedelta(days=27)), max(_tmin, _tmax - timedelta(days=14))),
+                min_value=_tmin, max_value=_tmax, key="tc_prev",
+            )
+
+        if isinstance(tc_cur, tuple) and len(tc_cur) == 2 and isinstance(tc_prev, tuple) and len(tc_prev) == 2:
+            df_tc_cur  = df_t_base[(df_t_base["날짜"].dt.date >= tc_cur[0])  & (df_t_base["날짜"].dt.date <= tc_cur[1])]
+            df_tc_prev = df_t_base[(df_t_base["날짜"].dt.date >= tc_prev[0]) & (df_t_base["날짜"].dt.date <= tc_prev[1])]
+            if sel_channels:
+                df_tc_cur  = df_tc_cur[df_tc_cur["채널명"].isin(sel_channels)]
+                df_tc_prev = df_tc_prev[df_tc_prev["채널명"].isin(sel_channels)]
+
+            agg_cur  = df_tc_cur.groupby(t_group_key)[t_metric].sum().rename("현재 기간")
+            agg_prev = df_tc_prev.groupby(t_group_key)[t_metric].sum().rename("비교 기간")
+            comp_tc = pd.concat([agg_cur, agg_prev], axis=1).fillna(0).reset_index()
+            comp_tc["변화율(%)"] = (
+                (comp_tc["현재 기간"] - comp_tc["비교 기간"])
+                / comp_tc["비교 기간"].replace(0, np.nan) * 100
+            ).fillna(0)
+            comp_tc = comp_tc.sort_values("현재 기간", ascending=False)
+
+            comp_tc_m = comp_tc.melt(
+                id_vars=t_group_key, value_vars=["현재 기간", "비교 기간"],
+                var_name="기간", value_name=t_metric,
+            )
+            fig_tc_comp = px.bar(
+                comp_tc_m, x=t_group_key, y=t_metric, color="기간",
+                barmode="group",
+                title=f"{t_metric} 기간 비교  |  현재: {tc_cur[0]}~{tc_cur[1]}  /  비교: {tc_prev[0]}~{tc_prev[1]}",
+                color_discrete_map={"현재 기간": "#1565C0", "비교 기간": "#90CAF9"},
+            )
+            fig_tc_comp.update_layout(height=420, plot_bgcolor="white",
+                                      legend=dict(orientation="h", y=-0.12))
+            st.plotly_chart(fig_tc_comp, use_container_width=True)
+
+            disp_tc = comp_tc.copy()
+            disp_tc["현재 기간"] = disp_tc["현재 기간"].apply(lambda x: f"{int(x):,}")
+            disp_tc["비교 기간"] = disp_tc["비교 기간"].apply(lambda x: f"{int(x):,}")
+            disp_tc["변화율(%)"] = disp_tc["변화율(%)"].map("{:+.1f}%".format)
+            st.dataframe(disp_tc, use_container_width=True, hide_index=True)
+
 
 with tab_conversion:
     st.subheader("채널별 전환율 & ROAS 분석")
@@ -1217,6 +1272,105 @@ with tab_conversion:
                                     height=380, plot_bgcolor="white",
                                     legend=dict(orientation="h"))
             st.plotly_chart(fig_adrev, use_container_width=True)
+
+        # ── 기간 비교 ──────────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("📊 기간 비교")
+        _cvtmin = df_traffic["날짜"].min().date()
+        _cvtmax = df_traffic["날짜"].max().date()
+        cv_cc1, cv_cc2 = st.columns(2)
+        with cv_cc1:
+            cv_comp_cur = st.date_input(
+                "현재 기간",
+                value=(max(_cvtmin, _cvtmax - timedelta(days=13)), _cvtmax),
+                min_value=_cvtmin, max_value=_cvtmax, key="cv_comp_cur",
+            )
+        with cv_cc2:
+            cv_comp_prev = st.date_input(
+                "비교 기간",
+                value=(max(_cvtmin, _cvtmax - timedelta(days=27)), max(_cvtmin, _cvtmax - timedelta(days=14))),
+                min_value=_cvtmin, max_value=_cvtmax, key="cv_comp_prev",
+            )
+
+        if isinstance(cv_comp_cur, tuple) and len(cv_comp_cur) == 2 and isinstance(cv_comp_prev, tuple) and len(cv_comp_prev) == 2:
+            df_cc = df_cv_base[(df_cv_base["날짜"].dt.date >= cv_comp_cur[0])  & (df_cv_base["날짜"].dt.date <= cv_comp_cur[1])]
+            df_cp = df_cv_base[(df_cv_base["날짜"].dt.date >= cv_comp_prev[0]) & (df_cv_base["날짜"].dt.date <= cv_comp_prev[1])]
+            if cv_sel_channels:
+                df_cc = df_cc[df_cc["채널명"].isin(cv_sel_channels)]
+                df_cp = df_cp[df_cp["채널명"].isin(cv_sel_channels)]
+
+            def _agg_comp(df, gk):
+                a = df.groupby(gk).agg(
+                    유입수=("유입수", "sum"),
+                    결제수=("결제수(마지막클릭)", "sum"),
+                    결제금액=("결제금액(마지막클릭)", "sum"),
+                    광고비=("광고비", "sum"),
+                ).reset_index()
+                a["전환율"] = (a["결제수"] / a["유입수"].replace(0, np.nan) * 100).fillna(0)
+                a["ROAS"]  = (a["결제금액"] / a["광고비"].replace(0, np.nan)).fillna(0)
+                return a
+
+            agg_cc = _agg_comp(df_cc, cv_group_key)
+            agg_cp = _agg_comp(df_cp, cv_group_key)
+            merged = agg_cc.merge(agg_cp, on=cv_group_key, suffixes=("_현재", "_비교"), how="outer").fillna(0)
+            for _col in ["전환율", "ROAS", "유입수", "결제금액"]:
+                merged[f"{_col}_변화율"] = (
+                    (merged[f"{_col}_현재"] - merged[f"{_col}_비교"])
+                    / merged[f"{_col}_비교"].replace(0, np.nan) * 100
+                ).fillna(0)
+            merged = merged.sort_values("유입수_현재", ascending=False)
+
+            # 전환율 & ROAS 비교 묶음 막대
+            cv_chart_cols = st.columns(2)
+            with cv_chart_cols[0]:
+                cvr_m = merged[[cv_group_key, "전환율_현재", "전환율_비교"]].melt(
+                    id_vars=cv_group_key, value_vars=["전환율_현재", "전환율_비교"],
+                    var_name="기간", value_name="전환율(%)",
+                )
+                cvr_m["기간"] = cvr_m["기간"].map({"전환율_현재": "현재 기간", "전환율_비교": "비교 기간"})
+                fig_cvr_c = px.bar(
+                    cvr_m, x=cv_group_key, y="전환율(%)", color="기간",
+                    barmode="group",
+                    title=f"전환율 비교  |  현재: {cv_comp_cur[0]}~{cv_comp_cur[1]}  /  비교: {cv_comp_prev[0]}~{cv_comp_prev[1]}",
+                    color_discrete_map={"현재 기간": "#2E7D32", "비교 기간": "#A5D6A7"},
+                )
+                fig_cvr_c.update_layout(height=380, plot_bgcolor="white",
+                                        legend=dict(orientation="h", y=-0.15))
+                st.plotly_chart(fig_cvr_c, use_container_width=True)
+
+            with cv_chart_cols[1]:
+                roas_m = merged[[cv_group_key, "ROAS_현재", "ROAS_비교"]].melt(
+                    id_vars=cv_group_key, value_vars=["ROAS_현재", "ROAS_비교"],
+                    var_name="기간", value_name="ROAS",
+                )
+                roas_m["기간"] = roas_m["기간"].map({"ROAS_현재": "현재 기간", "ROAS_비교": "비교 기간"})
+                roas_m = roas_m[roas_m["ROAS"] > 0]
+                if not roas_m.empty:
+                    fig_roas_c = px.bar(
+                        roas_m, x=cv_group_key, y="ROAS", color="기간",
+                        barmode="group", title="ROAS 비교",
+                        color_discrete_map={"현재 기간": "#E65100", "비교 기간": "#FFCC80"},
+                    )
+                    fig_roas_c.update_layout(height=380, plot_bgcolor="white",
+                                            legend=dict(orientation="h", y=-0.15))
+                    st.plotly_chart(fig_roas_c, use_container_width=True)
+
+            # 채널별 증감 테이블
+            st.subheader("채널별 지표 증감")
+            _dcols = [cv_group_key,
+                      "유입수_현재", "유입수_비교", "유입수_변화율",
+                      "전환율_현재", "전환율_비교", "전환율_변화율",
+                      "ROAS_현재", "ROAS_비교", "ROAS_변화율"]
+            disp_m = merged[[c for c in _dcols if c in merged.columns]].copy()
+            for c in ["유입수_현재", "유입수_비교"]:
+                if c in disp_m: disp_m[c] = disp_m[c].apply(lambda x: f"{int(x):,}")
+            for c in ["전환율_현재", "전환율_비교"]:
+                if c in disp_m: disp_m[c] = disp_m[c].map("{:.2f}%".format)
+            for c in ["ROAS_현재", "ROAS_비교"]:
+                if c in disp_m: disp_m[c] = disp_m[c].map("{:.1f}".format)
+            for c in ["유입수_변화율", "전환율_변화율", "ROAS_변화율"]:
+                if c in disp_m: disp_m[c] = disp_m[c].map("{:+.1f}%".format)
+            st.dataframe(disp_m, use_container_width=True, hide_index=True)
 
 
 with tab_insight:
