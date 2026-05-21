@@ -876,11 +876,18 @@ with tab_prod_trend:
                 "임계값 (직전 기간 대비 변화율 %)", 10, 80, 30, 5, key="pt_thresh",
                 help="이 값 이상 변화한 상품만 표시합니다. 전체 평균의 10% 미만 소량 상품은 제외.",
             )
+            _pt_dates = sorted(df_grouped["날짜"].unique())
+            if len(_pt_dates) >= 2:
+                _pure_fmt  = x_fmt.replace(" 주", "")
+                _suffix    = " 주" if "주" in x_fmt else ""
+                _prev_str  = pd.Timestamp(_pt_dates[-2]).strftime(_pure_fmt) + _suffix
+                _cur_str   = pd.Timestamp(_pt_dates[-1]).strftime(_pure_fmt) + _suffix
+                st.caption(f"📅 비교 기간: {_prev_str} (직전) → **{_cur_str}** (현재)")
             prod_alerts = detect_product_anomalies(df_grouped, metric_sel, pct_threshold=pt_thresh)
             if prod_alerts:
                 st.caption(f"직전 {period_sel} 대비 ±{pt_thresh}% 이상 변화 상품 — {len(prod_alerts)}건")
                 _render_anomaly_cards(prod_alerts, kind="product")
-            elif len(df_grouped["날짜"].unique()) < 2:
+            elif len(_pt_dates) < 2:
                 st.caption("기간이 2개 이상 있어야 감지됩니다.")
             else:
                 st.success(f"✅ 직전 {period_sel} 대비 ±{pt_thresh}% 이상 변화 상품 없음")
@@ -1115,6 +1122,13 @@ with tab_conversion:
                     "상대 변화 기준 (%)", 10, 80, 25, 5, key="cvr_rel_t",
                     help="두 조건(절대 + 상대)을 모두 만족해야 표시합니다.",
                 )
+            _cv_dates = sorted(cv_agg["날짜"].unique())
+            if len(_cv_dates) >= 2:
+                _cv_fmt    = {"일간": "%m/%d", "주간": "%m/%d", "월간": "%Y-%m"}.get(cv_period, "%Y-%m-%d")
+                _cv_suffix = " 주" if cv_period == "주간" else ""
+                _cv_prev   = pd.Timestamp(_cv_dates[-2]).strftime(_cv_fmt) + _cv_suffix
+                _cv_cur    = pd.Timestamp(_cv_dates[-1]).strftime(_cv_fmt) + _cv_suffix
+                st.caption(f"📅 비교 기간: {_cv_prev} (직전) → **{_cv_cur}** (현재)")
             cvr_alerts = detect_cvr_anomalies(
                 cv_agg, cv_group_key,
                 pct_threshold=float(cvr_rel_t),
@@ -1126,7 +1140,7 @@ with tab_conversion:
                     f"직전 {cv_period} 대비 전환율 절대 {cvr_abs_t}%p 이상 & 상대 {cvr_rel_t}% 이상 변화 — {len(cvr_alerts)}건"
                 )
                 _render_anomaly_cards(cvr_alerts, kind="cvr")
-            elif len(cv_agg["날짜"].unique()) < 2:
+            elif len(_cv_dates) < 2:
                 st.caption("기간이 2개 이상 있어야 감지됩니다.")
             else:
                 st.success("✅ 설정 기준 이상의 전환율 변화 채널 없음")
