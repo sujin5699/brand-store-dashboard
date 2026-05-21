@@ -350,6 +350,16 @@ def fmt_won(v: float) -> str:
     return f"{int(v):,}원"
 
 
+def auto_period(start_date, end_date) -> str:
+    """날짜 범위 → 기간 단위 자동 결정 (≤14일: 일간 / <90일: 주간 / 이상: 월간)"""
+    days = (end_date - start_date).days + 1
+    if days <= 14:
+        return "일간"
+    elif days < 90:
+        return "주간"
+    return "월간"
+
+
 def detect_product_anomalies(
     df_grouped: pd.DataFrame,
     metric_col: str,
@@ -697,13 +707,84 @@ if len(daily) >= 2:
 
 st.markdown("---")
 
+# ── 기간 단위 자동 결정 ───────────────────────────────────────────────────────
+if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+    _dr_start, _dr_end = date_range[0], date_range[1]
+else:
+    _dr_start = df_raw["날짜"].min().date()
+    _dr_end   = df_raw["날짜"].max().date()
+
+_auto_period = auto_period(_dr_start, _dr_end)
+_period_days = (_dr_end - _dr_start).days + 1
+st.sidebar.caption(f"📐 기간 단위: **{_auto_period}** ({_period_days}일 범위 기준 자동 선택)")
+
+# ── 상단 이상감지 배너 ────────────────────────────────────────────────────────
+_banner_prod_alerts: list[dict] = []
+if "상품명" in df_raw.columns:
+    _b_df = df_raw.copy()
+    _b_df["상품명_단축"] = _b_df["상품명"].str[:18]
+    if _auto_period == "주간":
+        _b_df["날짜"] = _b_df["날짜"].dt.to_period("W").dt.start_time
+    elif _auto_period == "월간":
+        _b_df["날짜"] = _b_df["날짜"].dt.to_period("M").dt.start_time
+    _b_top = _b_df.groupby("상품명")["결제금액"].sum().nlargest(10).index
+    _b_df  = _b_df[_b_df["상품명"].isin(_b_top)]
+    _b_grouped = _b_df.groupby(["날짜", "상품명_단축"])["결제금액"].sum().reset_index()
+    _banner_prod_alerts = detect_product_anomalies(_b_grouped, "결제금액")
+
+_banner_cvr_alerts: list[dict] = []
+if not df_traffic.empty and "채널그룹" in df_traffic.columns:
+    _b_traf = df_traffic[
+        (df_traffic["날짜"].dt.date >= _dr_start) &
+        (df_traffic["날짜"].dt.date <= _dr_end)
+    ].copy()
+    if not _b_traf.empty:
+        if _auto_period == "주간":
+            _b_traf["날짜"] = _b_traf["날짜"].dt.to_period("W").dt.start_time
+        elif _auto_period == "월간":
+            _b_traf["날짜"] = _b_traf["날짜"].dt.to_period("M").dt.start_time
+        _b_cv = _b_traf.groupby(["날짜", "채널그룹"]).agg(
+            유입수=("유입수", "sum"),
+            결제수=("결제수(마지막클릭)", "sum"),
+            결제금액=("결제금액(마지막클릭)", "sum"),
+            광고비=("광고비", "sum"),
+        ).reset_index()
+        _b_cv["전환율"] = (_b_cv["결제수"] / _b_cv["유입수"].replace(0, np.nan) * 100).fillna(0)
+        _banner_cvr_alerts = detect_cvr_anomalies(_b_cv, "채널그룹")
+
+_total_alerts = len(_banner_prod_alerts) + len(_banner_cvr_alerts)
+_sep = '&nbsp;&nbsp;<span style="color:#ddd;font-weight:300;">│</span>&nbsp;&nbsp;'
+if _total_alerts > 0:
+    _parts = []
+    for a in (_banner_prod_alerts + _banner_cvr_alerts)[:6]:
+        if "pct" in a:
+            icon = "🔺" if a["pct"] > 0 else "🔻"
+            _parts.append(f'{icon}&nbsp;<b>{a["name"]}</b>&nbsp;판매 {a["pct"]:+.0f}%')
+        else:
+            icon = "🔺" if a["abs_change"] > 0 else "🔻"
+            _parts.append(f'{icon}&nbsp;<b>{a["name"]}</b>&nbsp;전환율 {a["abs_change"]:+.2f}%p')
+    st.markdown(
+        f'<div style="background:#FFF8E1;border-left:5px solid #FF8F00;border-radius:8px;'
+        f'padding:10px 18px;margin:0 0 14px 0;font-size:0.88em;line-height:1.9;">'
+        f'⚠️&nbsp;<b>이상감지 {_total_alerts}건</b>&nbsp;&nbsp;&nbsp;'
+        f'{_sep.join(_parts)}</div>',
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        '<div style="background:#F1F8E9;border-left:5px solid #558B2F;border-radius:8px;'
+        'padding:10px 18px;margin:0 0 14px 0;font-size:0.88em;">'
+        '✅&nbsp;<b>이상 없음</b>&nbsp;&nbsp;전기간 대비 급락/급등 상품·채널 없음</div>',
+        unsafe_allow_html=True,
+    )
+
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_prod_trend, tab_period, tab_product, tab_traffic, tab_conversion, tab_insight = st.tabs(
     ["📈 상품 판매 추이", "📊 판매 추이", "📦 상품 분석", "📺 채널 트래픽", "🎯 전환율 분석", "💡 인사이트"]
 )
 
 with tab_period:
-    period_sel = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="main_period")
+    period_sel = _auto_period
 
     if period_sel == "일간":
         st.plotly_chart(render_trend_chart(daily, "일간 판매 추이", "%m/%d"), use_container_width=True)
@@ -832,7 +913,7 @@ with tab_prod_trend:
     else:
         n_unique = df_raw["상품명"].nunique()
 
-        ctrl1, ctrl2, ctrl3 = st.columns([1, 1, 2])
+        ctrl1, ctrl2 = st.columns([1, 1])
         with ctrl1:
             _pt_max = max(3, min(20, n_unique))
             top_n_trend = st.slider("상위 N개 상품", min(3, max(n_unique, 1)), _pt_max, min(5, _pt_max), key="pt_n")
@@ -842,8 +923,7 @@ with tab_prod_trend:
                 ["결제금액", "결제수", "결제상품수량", "환불금액"],
                 key="pt_metric",
             )
-        with ctrl3:
-            period_sel = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="pt_period")
+        period_sel = _auto_period
 
         # 상위 N 상품 (전체 기간 합산 기준)
         top_products = (
@@ -897,7 +977,7 @@ with tab_prod_trend:
         )
 
         # ── 급락/급등 감지 ────────────────────────────────────────────
-        with st.expander("⚠️ 급락/급등 감지", expanded=True):
+        with st.expander("⚙️ 급락/급등 감지 상세 설정", expanded=False):
             pt_thresh = st.slider(
                 "임계값 (직전 기간 대비 변화율 %)", 10, 80, 30, 5, key="pt_thresh",
                 help="이 값 이상 변화한 상품만 표시합니다. 전체 평균의 10% 미만 소량 상품은 제외.",
@@ -1007,11 +1087,8 @@ with tab_traffic:
         TRAFFIC_COLS = {
             "유입수": "유입수", "고객수": "고객수", "광고비": "광고비", "페이지수": "페이지수",
         }
-        tc1, tc2 = st.columns([1, 1])
-        with tc1:
-            t_metric = st.selectbox("지표", list(TRAFFIC_COLS.keys()), key="tc_metric")
-        with tc2:
-            t_period = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="tc_period")
+        t_metric = st.selectbox("지표", list(TRAFFIC_COLS.keys()), key="tc_metric")
+        t_period = _auto_period
 
         # 채널그룹 필터 (기본 표시 단위)
         all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
@@ -1138,13 +1215,10 @@ with tab_conversion:
     if df_traffic.empty:
         st.info("트래픽 데이터가 없습니다.")
     else:
-        cv1, cv2 = st.columns([1, 1])
-        with cv1:
-            cv_period = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="cv_period")
-        with cv2:
-            # 채널그룹 필터 (기본 표시 단위)
-            cv_all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
-            cv_sel_groups = st.multiselect("채널그룹 선택 (기본 표시 단위)", cv_all_groups, default=cv_all_groups, key="cv_groups")
+        cv_period = _auto_period
+        # 채널그룹 필터 (기본 표시 단위)
+        cv_all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
+        cv_sel_groups = st.multiselect("채널그룹 선택 (기본 표시 단위)", cv_all_groups, default=cv_all_groups, key="cv_groups")
 
         # 채널명 세부 필터 (선택 시 채널명 단위로 드릴다운)
         df_cv_base = df_traffic[df_traffic["채널그룹"].isin(cv_sel_groups)] if cv_sel_groups else df_traffic
@@ -1194,7 +1268,7 @@ with tab_conversion:
         st.markdown("---")
 
         # ── 전환율 급락/급등 감지 ──────────────────────────────────────
-        with st.expander("⚠️ 전환율 급락/급등 감지", expanded=True):
+        with st.expander("⚙️ 전환율 급락/급등 감지 상세 설정", expanded=False):
             cvr_c1, cvr_c2, cvr_c3 = st.columns(3)
             with cvr_c1:
                 cvr_min_v = st.number_input(
