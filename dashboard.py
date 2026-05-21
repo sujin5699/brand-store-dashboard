@@ -138,18 +138,28 @@ def _build_drive_service(creds_info: dict):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _list_drive_files(folder_id: str, creds_info: dict) -> list[dict]:
-    """파일 목록만 가져옴 (메타데이터만, 빠름)"""
-    service = _build_drive_service(creds_info)
-    results = service.files().list(
-        q=(
-            f"'{folder_id}' in parents"
-            " and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
-            " and trashed=false"
-        ),
-        fields="files(id, name)",
-        orderBy="name",
-    ).execute()
-    return results.get("files", [])
+    """파일 목록 전체 가져옴 — pageSize=1000 + nextPageToken 페이지네이션으로
+    100개 기본 한도를 우회해 파일이 아무리 많아도 누락 없이 반환"""
+    service   = _build_drive_service(creds_info)
+    all_files: list[dict] = []
+    page_token = None
+    while True:
+        resp = service.files().list(
+            q=(
+                f"'{folder_id}' in parents"
+                " and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
+                " and trashed=false"
+            ),
+            fields="nextPageToken, files(id, name)",
+            orderBy="name",
+            pageSize=1000,
+            **({"pageToken": page_token} if page_token else {}),
+        ).execute()
+        all_files.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return all_files
 
 
 @st.cache_data(show_spinner=False)
