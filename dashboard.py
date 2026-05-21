@@ -516,18 +516,23 @@ if USE_GDRIVE:
     folder_id_traffic = st.secrets["gdrive"].get("folder_id_traffic", "")
     creds_info        = dict(st.secrets["gdrive"]["credentials"])
 
-    if "df_raw" not in st.session_state:
+    # 파일 목록을 확인해서 세션 캐시와 다르면 자동 갱신 (5분마다 Drive 메타데이터 체크)
+    _current_ids = frozenset(f["id"] for f in _list_drive_files(folder_id, creds_info))
+    if "df_raw" not in st.session_state or st.session_state.get("_raw_file_ids") != _current_ids:
         with st.spinner("판매 데이터 로딩 중..."):
             df_raw = load_from_gdrive(folder_id, creds_info)
             st.session_state["df_raw"] = df_raw
+            st.session_state["_raw_file_ids"] = _current_ids
     else:
         df_raw = st.session_state["df_raw"]
 
     if folder_id_traffic:
-        if "df_traffic" not in st.session_state:
+        _current_traffic_ids = frozenset(f["id"] for f in _list_drive_files(folder_id_traffic, creds_info))
+        if "df_traffic" not in st.session_state or st.session_state.get("_traffic_file_ids") != _current_traffic_ids:
             with st.spinner("트래픽 데이터 로딩 중..."):
                 df_traffic = load_from_gdrive(folder_id_traffic, creds_info)
                 st.session_state["df_traffic"] = df_traffic
+                st.session_state["_traffic_file_ids"] = _current_traffic_ids
         else:
             df_traffic = st.session_state["df_traffic"]
     else:
@@ -536,10 +541,12 @@ if USE_GDRIVE:
     if st.sidebar.button("수동 새로고침", use_container_width=True):
         st.session_state.pop("df_raw", None)
         st.session_state.pop("df_traffic", None)
+        st.session_state.pop("_raw_file_ids", None)
+        st.session_state.pop("_traffic_file_ids", None)
         st.rerun()
 
     st.sidebar.success("☁️ Google Drive 연동 중")
-    st.sidebar.caption("매일 오전 11시 자동 갱신")
+    st.sidebar.caption("새 파일 감지 시 자동 갱신 (최대 5분)")
 
 else:
     # ── 로컬 폴더 모드 ────────────────────────────────────────────────────
