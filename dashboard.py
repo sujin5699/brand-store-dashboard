@@ -616,33 +616,23 @@ st.sidebar.subheader("필터")
 _max_date = df_raw["날짜"].max().date()
 _min_date = df_raw["날짜"].min().date()
 
-# 기간 기본값 우선순위: session_state > URL 파라미터 > 최근 30일
-if "date_range" in st.session_state:
-    _start, _end = st.session_state["date_range"]
-else:
-    _qs = st.query_params.get("ds")
-    _qe = st.query_params.get("de")
-    if _qs and _qe:
-        try:
-            _start = datetime.fromisoformat(_qs).date()
-            _end   = datetime.fromisoformat(_qe).date()
-        except Exception:
-            _start = None
-    else:
-        _start = None
-    if _start is None:
-        _start = max(_min_date, _max_date - timedelta(days=29))
-        _end   = _max_date
+# 사이드바에 실제 로드된 데이터 범위 표시 (필터와 무관)
+st.sidebar.caption(f"📂 로드된 데이터: {_min_date} ~ **{_max_date}**")
 
-# 실제 데이터 범위 내로 클램핑
-_start = max(_min_date, min(_start, _max_date))
-_end   = max(_min_date, min(_end,   _max_date))
+# 기간 기본값: session_state에 저장된 값 유지, 없으면 최신일 기준 최근 30일
+# (query_params 방식 제거 — URL에 날짜가 박혀 고정되는 문제 발생)
+if "date_range" in st.session_state:
+    _ss_start, _ss_end = st.session_state["date_range"]
+    # 데이터 실제 범위 내로 클램핑 (데이터가 갱신돼도 범위 초과 방지)
+    _start = max(_min_date, min(_ss_start, _max_date))
+    _end   = max(_min_date, min(_ss_end,   _max_date))
+else:
+    _start = max(_min_date, _max_date - timedelta(days=29))
+    _end   = _max_date
 
 date_range = st.sidebar.date_input("기간 선택", value=(_start, _end))
 if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
     st.session_state["date_range"] = tuple(date_range)
-    st.query_params["ds"] = date_range[0].isoformat()
-    st.query_params["de"] = date_range[1].isoformat()
     df_raw = df_raw[
         (df_raw["날짜"].dt.date >= date_range[0]) &
         (df_raw["날짜"].dt.date <= date_range[1])
