@@ -559,44 +559,46 @@ if len(daily) >= 2:
 st.markdown("---")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_prod_trend, tab_day, tab_week, tab_month, tab_product, tab_traffic, tab_conversion, tab_insight = st.tabs(
-    ["📈 상품 판매 추이", "📅 일간", "📆 주간", "🗓️ 월간", "📦 상품 분석", "📺 채널 트래픽", "🎯 전환율 분석", "💡 인사이트"]
+tab_prod_trend, tab_period, tab_product, tab_traffic, tab_conversion, tab_insight = st.tabs(
+    ["📈 상품 판매 추이", "📊 판매 추이", "📦 상품 분석", "📺 채널 트래픽", "🎯 전환율 분석", "💡 인사이트"]
 )
 
-with tab_day:
-    st.plotly_chart(render_trend_chart(daily, "일간 판매 추이", "%m/%d"), use_container_width=True)
+with tab_period:
+    period_sel = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="main_period")
 
-    st.subheader("일별 상세 데이터")
-    disp = daily.copy()
-    disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m-%d")
-    disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
-    disp["환불금액"] = disp["환불금액"].apply(lambda x: f"{int(x):,}")
-    disp["모바일비율"] = (disp["모바일비율"] * 100).map("{:.1f}%".format)
-    st.dataframe(disp, use_container_width=True, hide_index=True)
-
-with tab_week:
-    if len(weekly) < 2:
-        st.info("주간 집계를 위해 2주 이상 데이터가 필요합니다.")
-    else:
-        st.plotly_chart(render_trend_chart(weekly, "주간 판매 추이", "%m/%d 주"), use_container_width=True)
-        disp = weekly.copy()
-        disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m-%d 주")
+    if period_sel == "일간":
+        st.plotly_chart(render_trend_chart(daily, "일간 판매 추이", "%m/%d"), use_container_width=True)
+        st.subheader("일별 상세 데이터")
+        disp = daily.copy()
+        disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m-%d")
         disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
         disp["환불금액"] = disp["환불금액"].apply(lambda x: f"{int(x):,}")
         disp["모바일비율"] = (disp["모바일비율"] * 100).map("{:.1f}%".format)
         st.dataframe(disp, use_container_width=True, hide_index=True)
 
-with tab_month:
-    if len(monthly) < 1:
-        st.info("월간 집계 데이터가 없습니다.")
+    elif period_sel == "주간":
+        if len(weekly) < 2:
+            st.info("주간 집계를 위해 2주 이상 데이터가 필요합니다.")
+        else:
+            st.plotly_chart(render_trend_chart(weekly, "주간 판매 추이", "%m/%d 주"), use_container_width=True)
+            disp = weekly.copy()
+            disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m-%d 주")
+            disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
+            disp["환불금액"] = disp["환불금액"].apply(lambda x: f"{int(x):,}")
+            disp["모바일비율"] = (disp["모바일비율"] * 100).map("{:.1f}%".format)
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+
     else:
-        st.plotly_chart(render_trend_chart(monthly, "월간 판매 추이", "%Y-%m"), use_container_width=True)
-        disp = monthly.copy()
-        disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m")
-        disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
-        disp["환불금액"] = disp["환불금액"].apply(lambda x: f"{int(x):,}")
-        disp["모바일비율"] = (disp["모바일비율"] * 100).map("{:.1f}%".format)
-        st.dataframe(disp, use_container_width=True, hide_index=True)
+        if len(monthly) < 1:
+            st.info("월간 집계 데이터가 없습니다.")
+        else:
+            st.plotly_chart(render_trend_chart(monthly, "월간 판매 추이", "%Y-%m"), use_container_width=True)
+            disp = monthly.copy()
+            disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m")
+            disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
+            disp["환불금액"] = disp["환불금액"].apply(lambda x: f"{int(x):,}")
+            disp["모바일비율"] = (disp["모바일비율"] * 100).map("{:.1f}%".format)
+            st.dataframe(disp, use_container_width=True, hide_index=True)
 
 with tab_product:
     st.subheader("상품별 판매 성과")
