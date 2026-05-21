@@ -340,6 +340,101 @@ def fmt_won(v: float) -> str:
     return f"{int(v):,}원"
 
 
+def detect_product_anomalies(
+    df_grouped: pd.DataFrame,
+    metric_col: str,
+    name_col: str = "상품명_단축",
+    pct_threshold: float = 30.0,
+    min_ratio: float = 0.1,
+) -> list[dict]:
+    """직전 기간 대비 급락/급등 상품 반환 (pct_threshold % 이상 변화)"""
+    dates = sorted(df_grouped["날짜"].unique())
+    if len(dates) < 2:
+        return []
+    cur_date, prev_date = dates[-1], dates[-2]
+    cur  = df_grouped[df_grouped["날짜"] == cur_date].set_index(name_col)[metric_col]
+    prev = df_grouped[df_grouped["날짜"] == prev_date].set_index(name_col)[metric_col]
+
+    # 최소 규모 필터: 상품 평균이 전체 평균의 min_ratio 미만이면 제외
+    prod_mean  = df_grouped.groupby(name_col)[metric_col].mean()
+    global_avg = prod_mean.mean()
+    min_val    = global_avg * min_ratio if global_avg > 0 else 0
+
+    alerts = []
+    for prod in cur.index.intersection(prev.index):
+        if prev[prod] <= 0 or prod_mean.get(prod, 0) < min_val:
+            continue
+        pct = (cur[prod] - prev[prod]) / prev[prod] * 100
+        if abs(pct) >= pct_threshold:
+            alerts.append({"name": prod, "prev": prev[prod], "cur": cur[prod], "pct": pct})
+    return sorted(alerts, key=lambda x: abs(x["pct"]), reverse=True)
+
+
+def detect_cvr_anomalies(
+    cv_agg: pd.DataFrame,
+    group_key: str,
+    pct_threshold: float = 25.0,
+    abs_threshold: float = 1.0,
+    min_visits: int = 100,
+) -> list[dict]:
+    """직전 기간 대비 전환율 급락/급등 채널 반환
+    조건: 유입수 ≥ min_visits AND 절대 변화 ≥ abs_threshold%p AND 상대 변화 ≥ pct_threshold%
+    """
+    dates = sorted(cv_agg["날짜"].unique())
+    if len(dates) < 2:
+        return []
+    cur_date, prev_date = dates[-1], dates[-2]
+    cur  = cv_agg[cv_agg["날짜"] == cur_date].set_index(group_key)
+    prev = cv_agg[cv_agg["날짜"] == prev_date].set_index(group_key)
+
+    alerts = []
+    for ch in cur.index.intersection(prev.index):
+        if cur.loc[ch, "유입수"] < min_visits:
+            continue
+        cvr_c, cvr_p = cur.loc[ch, "전환율"], prev.loc[ch, "전환율"]
+        if cvr_p <= 0:
+            continue
+        abs_chg = cvr_c - cvr_p
+        rel_chg = abs_chg / cvr_p * 100
+        if abs(abs_chg) >= abs_threshold and abs(rel_chg) >= pct_threshold:
+            alerts.append({
+                "name": ch,
+                "prev_cvr": cvr_p, "cur_cvr": cvr_c,
+                "abs_change": abs_chg, "rel_change": rel_chg,
+                "visits": cur.loc[ch, "유입수"],
+            })
+    return sorted(alerts, key=lambda x: abs(x["rel_change"]), reverse=True)
+
+
+def _render_anomaly_cards(alerts: list[dict], kind: str = "product") -> None:
+    """급락(빨강) / 급등(초록) 카드를 최대 6개, 3열로 렌더링"""
+    n    = min(len(alerts), 6)
+    cols = st.columns(min(3, n))
+    for i, a in enumerate(alerts[:6]):
+        with cols[i % 3]:
+            if kind == "product":
+                pct    = a["pct"]
+                icon   = "🔺" if pct > 0 else "🔻"
+                color  = "#f0fff4" if pct > 0 else "#fff0f0"
+                border = "#28a745" if pct > 0 else "#dc3545"
+                title  = f"{icon} {a['name']}"
+                body   = f"{pct:+.1f}%&nbsp;&nbsp;{a['prev']:,.0f} → {a['cur']:,.0f}"
+            else:  # cvr
+                c      = a["abs_change"]
+                icon   = "🔺" if c > 0 else "🔻"
+                color  = "#f0fff4" if c > 0 else "#fff0f0"
+                border = "#28a745" if c > 0 else "#dc3545"
+                title  = f"{icon} {a['name']}"
+                body   = (f"{c:+.2f}%p&nbsp;({a['rel_change']:+.1f}%)"
+                          f"&nbsp;유입 {int(a['visits']):,}")
+            st.markdown(
+                f'<div style="background:{color};border-left:3px solid {border};'
+                f'border-radius:6px;padding:8px 10px;margin:2px 0;font-size:0.84em;">'
+                f'<b>{title}</b><br><span style="color:#444;">{body}</span></div>',
+                unsafe_allow_html=True,
+            )
+
+
 def render_trend_chart(agg: pd.DataFrame, title: str, x_fmt: str):
     fig = make_subplots(
         rows=2, cols=2,
@@ -781,6 +876,21 @@ with tab_prod_trend:
             .index.tolist()
         )
 
+        # ── 급락/급등 감지 ────────────────────────────────────────────
+        with st.expander("⚠️ 급락/급등 감지", expanded=True):
+            pt_thresh = st.slider(
+                "임계값 (직전 기간 대비 변화율 %)", 10, 80, 30, 5, key="pt_thresh",
+                help="이 값 이상 변화한 상품만 표시합니다. 전체 평균의 10% 미만 소량 상품은 제외.",
+            )
+            prod_alerts = detect_product_anomalies(df_grouped, metric_sel, pct_threshold=pt_thresh)
+            if prod_alerts:
+                st.caption(f"직전 {period_sel} 대비 ±{pt_thresh}% 이상 변화 상품 — {len(prod_alerts)}건")
+                _render_anomaly_cards(prod_alerts, kind="product")
+            elif len(df_grouped["날짜"].unique()) < 2:
+                st.caption("기간이 2개 이상 있어야 감지됩니다.")
+            else:
+                st.success(f"✅ 직전 {period_sel} 대비 ±{pt_thresh}% 이상 변화 상품 없음")
+
         # ── 멀티라인 차트 ──────────────────────────────────────────────
         fig_line = px.line(
             df_grouped,
@@ -991,6 +1101,41 @@ with tab_conversion:
         k2.metric("총 결제수", f"{int(total_orders_cv):,}")
         k3.metric("전체 전환율", f"{overall_cvr:.2f}%")
         k4.metric("전체 ROAS", f"{overall_roas:.1f}" if overall_roas else "N/A")
+        st.markdown("---")
+
+        # ── 전환율 급락/급등 감지 ──────────────────────────────────────
+        with st.expander("⚠️ 전환율 급락/급등 감지", expanded=True):
+            cvr_c1, cvr_c2, cvr_c3 = st.columns(3)
+            with cvr_c1:
+                cvr_min_v = st.number_input(
+                    "최소 유입수", min_value=10, max_value=10000, value=100, step=10, key="cvr_min_v",
+                    help="유입수가 이 값 미만인 채널은 노이즈로 보고 제외합니다.",
+                )
+            with cvr_c2:
+                cvr_abs_t = st.number_input(
+                    "절대 변화 기준 (%p)", min_value=0.1, max_value=10.0, value=1.0, step=0.1,
+                    key="cvr_abs_t", help="전환율이 이 값(%p) 이상 변해야 표시합니다.",
+                )
+            with cvr_c3:
+                cvr_rel_t = st.slider(
+                    "상대 변화 기준 (%)", 10, 80, 25, 5, key="cvr_rel_t",
+                    help="두 조건(절대 + 상대)을 모두 만족해야 표시합니다.",
+                )
+            cvr_alerts = detect_cvr_anomalies(
+                cv_agg, cv_group_key,
+                pct_threshold=float(cvr_rel_t),
+                abs_threshold=float(cvr_abs_t),
+                min_visits=int(cvr_min_v),
+            )
+            if cvr_alerts:
+                st.caption(
+                    f"직전 {cv_period} 대비 전환율 절대 {cvr_abs_t}%p 이상 & 상대 {cvr_rel_t}% 이상 변화 — {len(cvr_alerts)}건"
+                )
+                _render_anomaly_cards(cvr_alerts, kind="cvr")
+            elif len(cv_agg["날짜"].unique()) < 2:
+                st.caption("기간이 2개 이상 있어야 감지됩니다.")
+            else:
+                st.success("✅ 설정 기준 이상의 전환율 변화 채널 없음")
         st.markdown("---")
 
         cv_title_prefix = "채널명별" if cv_sel_channels else "채널그룹별"
