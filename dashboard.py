@@ -620,23 +620,41 @@ _min_date = df_raw["날짜"].min().date()
 st.sidebar.caption(f"📂 로드된 데이터: {_min_date} ~ **{_max_date}**")
 
 # 기간 기본값: session_state에 저장된 값 유지, 없으면 최신일 기준 최근 30일
-# (query_params 방식 제거 — URL에 날짜가 박혀 고정되는 문제 발생)
+# 저장된 기간이 데이터 범위 밖이면 리셋 (데이터가 바뀌었을 때 오동작 방지)
 if "date_range" in st.session_state:
     _ss_start, _ss_end = st.session_state["date_range"]
-    # 데이터 실제 범위 내로 클램핑 (데이터가 갱신돼도 범위 초과 방지)
-    _start = max(_min_date, min(_ss_start, _max_date))
-    _end   = max(_min_date, min(_ss_end,   _max_date))
+    if _ss_end < _min_date or _ss_start > _max_date:
+        del st.session_state["date_range"]
+
+if "date_range" in st.session_state:
+    _ss_start, _ss_end = st.session_state["date_range"]
+    _start = max(_min_date, _ss_start)
+    _end   = min(_max_date, _ss_end)
 else:
     _start = max(_min_date, _max_date - timedelta(days=29))
     _end   = _max_date
 
-date_range = st.sidebar.date_input("기간 선택", value=(_start, _end))
+# min_value/max_value로 선택 가능 범위를 데이터 범위로 제한
+date_range = st.sidebar.date_input(
+    "기간 선택", value=(_start, _end),
+    min_value=_min_date, max_value=_max_date,
+    key="sidebar_date",
+)
 if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
     st.session_state["date_range"] = tuple(date_range)
     df_raw = df_raw[
         (df_raw["날짜"].dt.date >= date_range[0]) &
         (df_raw["날짜"].dt.date <= date_range[1])
     ]
+
+# 필터 후 데이터가 비어있으면 안내 메시지 표시
+if df_raw.empty:
+    st.warning(
+        f"선택한 기간에 데이터가 없습니다.  \n"
+        f"실제 데이터 범위: **{_min_date} ~ {_max_date}**  \n"
+        f"사이드바에서 기간을 조정해 주세요."
+    )
+    st.stop()
 
 # ── Aggregations ─────────────────────────────────────────────────────────────
 daily = aggregate_daily(df_raw)
@@ -806,7 +824,8 @@ with tab_prod_trend:
 
         ctrl1, ctrl2, ctrl3 = st.columns([1, 1, 2])
         with ctrl1:
-            top_n_trend = st.slider("상위 N개 상품", 3, min(20, n_unique), min(5, n_unique), key="pt_n")
+            _pt_max = max(3, min(20, n_unique))
+            top_n_trend = st.slider("상위 N개 상품", min(3, max(n_unique, 1)), _pt_max, min(5, _pt_max), key="pt_n")
         with ctrl2:
             metric_sel = st.selectbox(
                 "지표",
