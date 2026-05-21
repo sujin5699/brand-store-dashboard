@@ -9,7 +9,7 @@ import numpy as np
 import time
 import threading
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -517,11 +517,36 @@ if "상품카테고리(대)" in df_raw.columns:
     if sel_cat != "전체":
         df_raw = df_raw[df_raw["상품카테고리(대)"] == sel_cat]
 
-date_range = st.sidebar.date_input(
-    "기간 선택",
-    value=(df_raw["날짜"].min().date(), df_raw["날짜"].max().date()),
-)
+_max_date = df_raw["날짜"].max().date()
+_min_date = df_raw["날짜"].min().date()
+
+# 기간 기본값 우선순위: session_state > URL 파라미터 > 최근 30일
+if "date_range" in st.session_state:
+    _start, _end = st.session_state["date_range"]
+else:
+    _qs = st.query_params.get("ds")
+    _qe = st.query_params.get("de")
+    if _qs and _qe:
+        try:
+            _start = datetime.fromisoformat(_qs).date()
+            _end   = datetime.fromisoformat(_qe).date()
+        except Exception:
+            _start = None
+    else:
+        _start = None
+    if _start is None:
+        _start = max(_min_date, _max_date - timedelta(days=29))
+        _end   = _max_date
+
+# 실제 데이터 범위 내로 클램핑
+_start = max(_min_date, min(_start, _max_date))
+_end   = max(_min_date, min(_end,   _max_date))
+
+date_range = st.sidebar.date_input("기간 선택", value=(_start, _end))
 if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+    st.session_state["date_range"] = tuple(date_range)
+    st.query_params["ds"] = date_range[0].isoformat()
+    st.query_params["de"] = date_range[1].isoformat()
     df_raw = df_raw[
         (df_raw["날짜"].dt.date >= date_range[0]) &
         (df_raw["날짜"].dt.date <= date_range[1])
@@ -605,8 +630,38 @@ with tab_product:
     if "상품명" not in df_raw.columns:
         st.warning("상품명 컬럼이 없습니다.")
     else:
+        pa1, pa2 = st.columns([1, 2])
+        with pa1:
+            pa_period = st.radio("기간 단위", ["전체", "일간", "주간", "월간"], horizontal=True, key="pa_period")
+
+        df_pa = df_raw.copy()
+        pa_title_suffix = "전체 기간"
+
+        if pa_period != "전체":
+            if pa_period == "일간":
+                avail_vals   = sorted(df_pa["날짜"].dt.date.unique(), reverse=True)
+                avail_labels = [str(v) for v in avail_vals]
+            elif pa_period == "주간":
+                df_pa["_p"]  = df_pa["날짜"].dt.to_period("W").dt.start_time
+                avail_vals   = sorted(df_pa["_p"].unique(), reverse=True)
+                avail_labels = [v.strftime("%Y-%m-%d 주") for v in avail_vals]
+            else:
+                df_pa["_p"]  = df_pa["날짜"].dt.to_period("M").dt.start_time
+                avail_vals   = sorted(df_pa["_p"].unique(), reverse=True)
+                avail_labels = [v.strftime("%Y-%m") for v in avail_vals]
+
+            with pa2:
+                sel_label = st.selectbox("분석 기간", avail_labels, key="pa_pick")
+            sel_val = avail_vals[avail_labels.index(sel_label)]
+            pa_title_suffix = sel_label
+
+            if pa_period == "일간":
+                df_pa = df_pa[df_pa["날짜"].dt.date == sel_val]
+            else:
+                df_pa = df_pa[df_pa["_p"] == sel_val]
+
         prod_agg = (
-            df_raw.groupby("상품명")
+            df_pa.groupby("상품명")
             .agg(결제금액=("결제금액", "sum"), 결제수=("결제수", "sum"),
                  환불금액=("환불금액", "sum"), 결제상품수량=("결제상품수량", "sum"))
             .reset_index()
@@ -614,14 +669,14 @@ with tab_product:
         )
         prod_agg["환불율"] = (prod_agg["환불금액"] / prod_agg["결제금액"].replace(0, np.nan) * 100).fillna(0)
 
-        top_n = st.slider("상위 N개 상품", 5, min(30, len(prod_agg)), 10)
+        top_n = st.slider("상위 N개 상품", 5, min(30, max(len(prod_agg), 5)), 10, key="pa_topn")
         top = prod_agg.head(top_n)
 
         col_a, col_b = st.columns(2)
         with col_a:
             fig_bar = px.bar(
                 top, x="결제금액", y="상품명", orientation="h",
-                title="상위 상품 결제금액", color="결제금액",
+                title=f"상위 상품 결제금액 ({pa_title_suffix})", color="결제금액",
                 color_continuous_scale="Greens",
                 labels={"결제금액": "결제금액(원)", "상품명": ""},
             )
@@ -632,28 +687,28 @@ with tab_product:
             fig_scatter = px.scatter(
                 prod_agg.head(top_n * 2), x="결제수", y="환불율",
                 size="결제금액", hover_name="상품명",
-                title="결제수 vs 환불율",
+                title=f"결제수 vs 환불율 ({pa_title_suffix})",
                 labels={"결제수": "결제건수", "환불율": "환불율(%)"},
                 color="환불율", color_continuous_scale="RdYlGn_r",
             )
             fig_scatter.update_layout(height=400)
             st.plotly_chart(fig_scatter, use_container_width=True)
 
-        if "상품카테고리(대)" in df_raw.columns:
+        if "상품카테고리(대)" in df_pa.columns:
             cat_agg = (
-                df_raw.groupby("상품카테고리(대)")
+                df_pa.groupby("상품카테고리(대)")
                 .agg(결제금액=("결제금액", "sum"))
                 .reset_index()
             )
             fig_pie = px.pie(cat_agg, names="상품카테고리(대)", values="결제금액",
-                             title="카테고리별 매출 비중")
+                             title=f"카테고리별 매출 비중 ({pa_title_suffix})")
             st.plotly_chart(fig_pie, use_container_width=True)
 
         st.subheader("전체 상품 상세")
         disp_prod = prod_agg.copy()
         disp_prod["결제금액"] = disp_prod["결제금액"].apply(lambda x: f"{int(x):,}")
         disp_prod["환불금액"] = disp_prod["환불금액"].apply(lambda x: f"{int(x):,}")
-        disp_prod["환불율"] = disp_prod["환불율"].map("{:.1f}%".format)
+        disp_prod["환불율"]   = disp_prod["환불율"].map("{:.1f}%".format)
         st.dataframe(disp_prod, use_container_width=True, hide_index=True)
 
 with tab_prod_trend:
