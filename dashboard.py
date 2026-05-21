@@ -1074,23 +1074,31 @@ with tab_traffic:
         st.subheader("📊 기간 비교")
         _tmin = df_traffic["날짜"].min().date()
         _tmax = df_traffic["날짜"].max().date()
-        tc_col1, tc_col2 = st.columns(2)
-        with tc_col1:
-            tc_cur = st.date_input(
-                "현재 기간",
-                value=(max(_tmin, _tmax - timedelta(days=13)), _tmax),
-                min_value=_tmin, max_value=_tmax, key="tc_cur",
-            )
-        with tc_col2:
-            tc_prev = st.date_input(
-                "비교 기간",
-                value=(max(_tmin, _tmax - timedelta(days=27)), max(_tmin, _tmax - timedelta(days=14))),
-                min_value=_tmin, max_value=_tmax, key="tc_prev",
-            )
 
-        if isinstance(tc_cur, tuple) and len(tc_cur) == 2 and isinstance(tc_prev, tuple) and len(tc_prev) == 2:
-            df_tc_cur  = df_t_base[(df_t_base["날짜"].dt.date >= tc_cur[0])  & (df_t_base["날짜"].dt.date <= tc_cur[1])]
-            df_tc_prev = df_t_base[(df_t_base["날짜"].dt.date >= tc_prev[0]) & (df_t_base["날짜"].dt.date <= tc_prev[1])]
+        _tc_def_cur  = (max(_tmin, _tmax - timedelta(days=13)), _tmax)
+        _tc_def_prev = (max(_tmin, _tmax - timedelta(days=27)), max(_tmin, _tmax - timedelta(days=14)))
+        _tc_saved    = st.session_state.get("tc_comp_dates", (_tc_def_cur, _tc_def_prev))
+
+        with st.form(key="tc_compare_form"):
+            tc_col1, tc_col2 = st.columns(2)
+            with tc_col1:
+                tc_cur = st.date_input(
+                    "현재 기간", value=_tc_saved[0],
+                    min_value=_tmin, max_value=_tmax,
+                )
+            with tc_col2:
+                tc_prev = st.date_input(
+                    "비교 기간", value=_tc_saved[1],
+                    min_value=_tmin, max_value=_tmax,
+                )
+            if st.form_submit_button("비교하기", use_container_width=True, type="primary"):
+                st.session_state["tc_comp_dates"] = (tc_cur, tc_prev)
+
+        tc_cur_use, tc_prev_use = st.session_state.get("tc_comp_dates", (_tc_def_cur, _tc_def_prev))
+
+        if isinstance(tc_cur_use, tuple) and len(tc_cur_use) == 2 and isinstance(tc_prev_use, tuple) and len(tc_prev_use) == 2:
+            df_tc_cur  = df_t_base[(df_t_base["날짜"].dt.date >= tc_cur_use[0])  & (df_t_base["날짜"].dt.date <= tc_cur_use[1])]
+            df_tc_prev = df_t_base[(df_t_base["날짜"].dt.date >= tc_prev_use[0]) & (df_t_base["날짜"].dt.date <= tc_prev_use[1])]
             if sel_channels:
                 df_tc_cur  = df_tc_cur[df_tc_cur["채널명"].isin(sel_channels)]
                 df_tc_prev = df_tc_prev[df_tc_prev["채널명"].isin(sel_channels)]
@@ -1111,7 +1119,7 @@ with tab_traffic:
             fig_tc_comp = px.bar(
                 comp_tc_m, x=t_group_key, y=t_metric, color="기간",
                 barmode="group",
-                title=f"{t_metric} 기간 비교  |  현재: {tc_cur[0]}~{tc_cur[1]}  /  비교: {tc_prev[0]}~{tc_prev[1]}",
+                title=f"{t_metric} 기간 비교  |  현재: {tc_cur_use[0]}~{tc_cur_use[1]}  /  비교: {tc_prev_use[0]}~{tc_prev_use[1]}",
                 color_discrete_map={"현재 기간": "#1565C0", "비교 기간": "#90CAF9"},
             )
             fig_tc_comp.update_layout(height=420, plot_bgcolor="white",
@@ -1278,23 +1286,31 @@ with tab_conversion:
         st.subheader("📊 기간 비교")
         _cvtmin = df_traffic["날짜"].min().date()
         _cvtmax = df_traffic["날짜"].max().date()
-        cv_cc1, cv_cc2 = st.columns(2)
-        with cv_cc1:
-            cv_comp_cur = st.date_input(
-                "현재 기간",
-                value=(max(_cvtmin, _cvtmax - timedelta(days=13)), _cvtmax),
-                min_value=_cvtmin, max_value=_cvtmax, key="cv_comp_cur",
-            )
-        with cv_cc2:
-            cv_comp_prev = st.date_input(
-                "비교 기간",
-                value=(max(_cvtmin, _cvtmax - timedelta(days=27)), max(_cvtmin, _cvtmax - timedelta(days=14))),
-                min_value=_cvtmin, max_value=_cvtmax, key="cv_comp_prev",
-            )
 
-        if isinstance(cv_comp_cur, tuple) and len(cv_comp_cur) == 2 and isinstance(cv_comp_prev, tuple) and len(cv_comp_prev) == 2:
-            df_cc = df_cv_base[(df_cv_base["날짜"].dt.date >= cv_comp_cur[0])  & (df_cv_base["날짜"].dt.date <= cv_comp_cur[1])]
-            df_cp = df_cv_base[(df_cv_base["날짜"].dt.date >= cv_comp_prev[0]) & (df_cv_base["날짜"].dt.date <= cv_comp_prev[1])]
+        _cv_def_cur  = (max(_cvtmin, _cvtmax - timedelta(days=13)), _cvtmax)
+        _cv_def_prev = (max(_cvtmin, _cvtmax - timedelta(days=27)), max(_cvtmin, _cvtmax - timedelta(days=14)))
+        _cv_saved    = st.session_state.get("cv_comp_dates", (_cv_def_cur, _cv_def_prev))
+
+        with st.form(key="cv_compare_form"):
+            cv_cc1, cv_cc2 = st.columns(2)
+            with cv_cc1:
+                cv_comp_cur = st.date_input(
+                    "현재 기간", value=_cv_saved[0],
+                    min_value=_cvtmin, max_value=_cvtmax,
+                )
+            with cv_cc2:
+                cv_comp_prev = st.date_input(
+                    "비교 기간", value=_cv_saved[1],
+                    min_value=_cvtmin, max_value=_cvtmax,
+                )
+            if st.form_submit_button("비교하기", use_container_width=True, type="primary"):
+                st.session_state["cv_comp_dates"] = (cv_comp_cur, cv_comp_prev)
+
+        cv_comp_cur_use, cv_comp_prev_use = st.session_state.get("cv_comp_dates", (_cv_def_cur, _cv_def_prev))
+
+        if isinstance(cv_comp_cur_use, tuple) and len(cv_comp_cur_use) == 2 and isinstance(cv_comp_prev_use, tuple) and len(cv_comp_prev_use) == 2:
+            df_cc = df_cv_base[(df_cv_base["날짜"].dt.date >= cv_comp_cur_use[0])  & (df_cv_base["날짜"].dt.date <= cv_comp_cur_use[1])]
+            df_cp = df_cv_base[(df_cv_base["날짜"].dt.date >= cv_comp_prev_use[0]) & (df_cv_base["날짜"].dt.date <= cv_comp_prev_use[1])]
             if cv_sel_channels:
                 df_cc = df_cc[df_cc["채널명"].isin(cv_sel_channels)]
                 df_cp = df_cp[df_cp["채널명"].isin(cv_sel_channels)]
@@ -1331,7 +1347,7 @@ with tab_conversion:
                 fig_cvr_c = px.bar(
                     cvr_m, x=cv_group_key, y="전환율(%)", color="기간",
                     barmode="group",
-                    title=f"전환율 비교  |  현재: {cv_comp_cur[0]}~{cv_comp_cur[1]}  /  비교: {cv_comp_prev[0]}~{cv_comp_prev[1]}",
+                    title=f"전환율 비교  |  현재: {cv_comp_cur_use[0]}~{cv_comp_cur_use[1]}  /  비교: {cv_comp_prev_use[0]}~{cv_comp_prev_use[1]}",
                     color_discrete_map={"현재 기간": "#2E7D32", "비교 기간": "#A5D6A7"},
                 )
                 fig_cvr_c.update_layout(height=380, plot_bgcolor="white",
