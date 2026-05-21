@@ -923,18 +923,3 @@ with tab_ranking:
                 disp_r["판매량"] = disp_r["판매량"].apply(lambda v: f"{int(v):,}")
                 st.dataframe(disp_r, use_container_width=True, hide_index=True)
 
-        st.markdown("---")
-        st.subheader("전 채널 Top 5 종합")
-        _pv_src = df_view.dropna(subset=["제품명"])
-        _pv_src = _pv_src[_pv_src["제품명"].astype(str).str.strip() != ""]
-        if not _pv_src.empty:
-            pivot_rank = _pv_src.pivot_table(
-                index=["순위", "제품명"], columns="채널", values="판매량",
-                aggfunc="sum", fill_value=0,   # ← NaN → 0
-            ).reset_index()
-            pivot_rank.columns.name = None      # ← "채널" 그룹 레이블 제거
-            # 판매량 컬럼 정수 포맷
-            ch_cols = [c for c in pivot_rank.columns if c not in ("순위", "제품명")]
-            for c in ch_cols:
-                pivot_rank[c] = pivot_rank[c].astype(int)
-            st.dataframe(pivot_rank, use_container_width=True, hide_index=True)
