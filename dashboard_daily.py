@@ -1,5 +1,6 @@
 """
 온/오프라인 데일리 매출 대시보드  ·  데이터 소스: Google Spreadsheet
+구조 A안: [📊 요약] [🔵 온라인] [🟠 오프라인] [🏆 순위]
 """
 
 import re
@@ -38,8 +39,12 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-  .kpi-card { background:#f8f9fa; border-radius:10px; padding:16px;
-              border-left:4px solid #4CAF50; margin-bottom:8px; }
+  [data-testid="stMetricValue"] { font-size: 1.35rem; font-weight: 700; }
+  [data-testid="stMetricDelta"] { font-size: 0.82rem; }
+  .sec-head {
+    font-size: 0.95rem; font-weight: 600; color: #666;
+    border-bottom: 2px solid #eee; padding-bottom: 4px; margin: 18px 0 10px;
+  }
 </style>
 """, unsafe_allow_html=True)
 
@@ -99,10 +104,8 @@ def _get_creds_info() -> dict:
     }
 
 
-# ── Sheets 서비스 객체: 세션 간 재사용 (build 1회만 호출) ─────────────────
 @st.cache_resource
 def _get_sheets_service(creds_json: str):
-    """Google Sheets API 서비스 — 세션/재실행 간 재사용"""
     creds = service_account.Credentials.from_service_account_info(
         json.loads(creds_json),
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
@@ -151,6 +154,10 @@ def fmt_won(v: float) -> str:
     return f"{int(v):,}원"
 
 
+def _pct(curr: float, prev: float):
+    return (curr - prev) / prev * 100 if prev else None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 채널 메타 파싱
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,8 +174,8 @@ def load_channel_meta(creds_json: str) -> list[dict]:
     row2 = pad(rows[1] if len(rows) > 1 else [])
     row4 = pad(rows[3] if len(rows) > 3 else [])
 
-    online_start      = COL["채널_시작"]
-    offline_agg_start = COL["오프라인_정규_통합_시작"]
+    online_start        = COL["채널_시작"]
+    offline_agg_start   = COL["오프라인_정규_통합_시작"]
     offline_indiv_start = COL["오프라인_개별_시작"]
 
     channels: list[dict] = []
@@ -219,7 +226,6 @@ def load_channel_df(creds_json: str) -> pd.DataFrame:
         except Exception:
             continue
         row = _pad(row, max_col)
-        # 총_매출, 온라인_매출, 오프라인_매출 모두 0이면 미입력 행
         if (_num(row[COL["총_매출"]]) == 0
                 and _num(row[COL["온라인_매출"]]) == 0
                 and _num(row[COL["오프라인_매출"]]) == 0):
@@ -246,11 +252,10 @@ def load_channel_df(creds_json: str) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 데이터 로딩: 제품별 (3개 시트를 1번 API 세트로 통합 캐시)
+# 데이터 로딩: 제품별
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _parse_product_sheet(svc, sheet: str, today) -> pd.DataFrame:
-    """제품별 시트 1개 파싱 (캐시 없음 — load_all_products 내부에서 호출)"""
     header_rows = _fetch(svc, sheet, "A4:BZ4")
     if not header_rows:
         return pd.DataFrame()
@@ -281,7 +286,6 @@ def _parse_product_sheet(svc, sheet: str, today) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner="제품별 데이터 로딩 중…")
 def load_all_products(creds_json: str) -> dict[str, pd.DataFrame]:
-    """통합/온라인/오프라인 제품별 시트를 1회 인증으로 순차 로드"""
     svc = _get_sheets_service(creds_json)
     today = datetime.now().date()
     return {
@@ -292,7 +296,7 @@ def load_all_products(creds_json: str) -> dict[str, pd.DataFrame]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 데이터 로딩: 판매 순위 (2개 시트를 1번 인증으로)
+# 데이터 로딩: 판매 순위
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _parse_ranking_sheet(svc, sheet: str) -> pd.DataFrame:
@@ -341,7 +345,6 @@ def _parse_ranking_sheet(svc, sheet: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_all_rankings(creds_json: str) -> dict[str, pd.DataFrame]:
-    """월간/주간 판매 순위를 1회 인증으로 로드"""
     svc = _get_sheets_service(creds_json)
     return {
         "월간": _parse_ranking_sheet(svc, "월간 판매 순위"),
@@ -371,7 +374,6 @@ def resample_df(df: pd.DataFrame, unit: str, agg_cols: list[str]) -> pd.DataFram
 def channel_long(df: pd.DataFrame, channels: list[dict],
                  ch_type: str | None = None, unit: str = "일간",
                  metric: str = "매출") -> pd.DataFrame:
-    """채널별 wide → long (pandas melt — iterrows 없음)"""
     chs = [ch for ch in channels if ch_type is None or ch["type"] == ch_type]
     col_names = [f"{ch['name']}_{metric}" for ch in chs
                  if f"{ch['name']}_{metric}" in df.columns]
@@ -390,8 +392,20 @@ def channel_long(df: pd.DataFrame, channels: list[dict],
     return long[long[metric] > 0]
 
 
+def _prod_cols(src_df: pd.DataFrame) -> list[str]:
+    META = {
+        "날짜", "요일", "목표", "달성률", "매출(거래액)",
+        "매출(결제액)\n*취소 제외", "매출(결제액) *취소 제외",
+        "매출 거래액+결제액", "수량",
+        "목표 *결제액 기준", "목표\n*결제액 기준",
+        "매출\n거래액+결제액", "목표\n",
+    }
+    return [c for c in src_df.columns
+            if c not in META and not c.startswith("매출") and c != "날짜"]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 사이드바 & 인증
+# 사이드바 & 데이터 로딩
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.sidebar.title("📊 온/오프라인 매출\n대시보드")
@@ -400,7 +414,6 @@ st.sidebar.markdown("---")
 creds_info = _get_creds_info()
 creds_json = json.dumps(creds_info)
 
-# ── 초기 로딩: channels + channel_df 먼저, 나머지는 캐시 통합 ─────────────
 with st.spinner("데이터 연결 중…"):
     try:
         channels     = load_channel_meta(creds_json)
@@ -411,7 +424,6 @@ with st.spinner("데이터 연결 중…"):
         st.error(f"데이터 로드 실패: {e}")
         st.stop()
 
-df_prod     = prod_dict["통합"]
 df_prod_on  = prod_dict["온라인"]
 df_prod_off = prod_dict["오프라인"]
 df_rank_m   = ranking_dict["월간"]
@@ -421,7 +433,7 @@ if df_ch.empty:
     st.warning("불러온 일별 데이터가 없습니다.")
     st.stop()
 
-# ── 기간 필터 ────────────────────────────────────────────────────────────────
+# 기간 필터
 _min_d = df_ch["날짜"].min().date()
 _max_d = df_ch["날짜"].max().date()
 
@@ -435,12 +447,14 @@ date_range = st.sidebar.date_input(
 )
 if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
     s_date, e_date = date_range
-    df   = df_ch[(df_ch["날짜"].dt.date >= s_date) & (df_ch["날짜"].dt.date <= e_date)].copy()
-    df_p  = df_prod[(df_prod["날짜"].dt.date >= s_date) & (df_prod["날짜"].dt.date <= e_date)].copy()     if not df_prod.empty     else df_prod
-    df_po = df_prod_on[(df_prod_on["날짜"].dt.date >= s_date) & (df_prod_on["날짜"].dt.date <= e_date)].copy() if not df_prod_on.empty  else df_prod_on
-    df_pf = df_prod_off[(df_prod_off["날짜"].dt.date >= s_date) & (df_prod_off["날짜"].dt.date <= e_date)].copy() if not df_prod_off.empty else df_prod_off
+    df    = df_ch[(df_ch["날짜"].dt.date >= s_date) & (df_ch["날짜"].dt.date <= e_date)].copy()
+    df_po = df_prod_on[(df_prod_on["날짜"].dt.date >= s_date) & (df_prod_on["날짜"].dt.date <= e_date)].copy() \
+            if not df_prod_on.empty else df_prod_on
+    df_pf = df_prod_off[(df_prod_off["날짜"].dt.date >= s_date) & (df_prod_off["날짜"].dt.date <= e_date)].copy() \
+            if not df_prod_off.empty else df_prod_off
 else:
-    df, df_p, df_po, df_pf = df_ch, df_prod, df_prod_on, df_prod_off
+    s_date, e_date = _min_d, _max_d
+    df, df_po, df_pf = df_ch, df_prod_on, df_prod_off
 
 if df.empty:
     st.warning("선택 기간에 데이터가 없습니다.")
@@ -456,54 +470,83 @@ online_channels  = [ch for ch in channels if ch["type"] == "온라인"]
 offline_channels = [ch for ch in channels if ch["type"] == "오프라인"]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 메인 타이틀 & KPI (달성률 제거 — 매출 3개만)
+# 이전 기간 대비 델타 — 선택 기간과 동일한 길이의 직전 기간
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.title("📊 온/오프라인 매출 대시보드")
+n_days   = (e_date - s_date).days + 1
+_prev_e  = s_date - timedelta(days=1)
+_prev_s  = _prev_e - timedelta(days=n_days - 1)
+df_pp    = df_ch[
+    (df_ch["날짜"].dt.date >= _prev_s) &
+    (df_ch["날짜"].dt.date <= _prev_e)
+]
+delta_label = f"전 {n_days}일 대비"
 
 total_rev   = df["총_매출"].sum()
 online_rev  = df["온라인_매출"].sum()
 offline_rev = df["오프라인_매출"].sum()
 
-def _vs_prev(df_: pd.DataFrame, col: str) -> float | None:
-    if len(df_) < 2:
-        return None
-    last, prev = df_.iloc[-1][col], df_.iloc[-2][col]
-    return (last - prev) / prev * 100 if prev else None
+rev_delta = _pct(total_rev,   df_pp["총_매출"].sum())
+on_delta  = _pct(online_rev,  df_pp["온라인_매출"].sum())
+off_delta = _pct(offline_rev, df_pp["오프라인_매출"].sum())
 
-rev_delta = _vs_prev(df, "총_매출")
-on_delta  = _vs_prev(df, "온라인_매출")
-off_delta = _vs_prev(df, "오프라인_매출")
+# 채널별 매출 집계 (탭 공통)
+on_rev_list = sorted(
+    [(ch["name"], df[f"{ch['name']}_매출"].sum())
+     for ch in online_channels if f"{ch['name']}_매출" in df.columns
+     and df[f"{ch['name']}_매출"].sum() > 0],
+    key=lambda x: x[1], reverse=True,
+)
+off_rev_list = sorted(
+    [(ch["name"], df[f"{ch['name']}_매출"].sum())
+     for ch in offline_channels if f"{ch['name']}_매출" in df.columns
+     and df[f"{ch['name']}_매출"].sum() > 0],
+    key=lambda x: x[1], reverse=True,
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 상단 KPI (3개, 전기간 대비 델타 명시)
+# ─────────────────────────────────────────────────────────────────────────────
+
+st.title("📊 온/오프라인 매출 대시보드")
 
 k1, k2, k3 = st.columns(3)
-k1.metric("📦 총 매출",      fmt_won(total_rev),
-          f"{rev_delta:+.1f}%" if rev_delta is not None else None)
-k2.metric("🔵 온라인 매출",  fmt_won(online_rev),
-          f"{on_delta:+.1f}%"  if on_delta  is not None else None)
-k3.metric("🟠 오프라인 매출", fmt_won(offline_rev),
-          f"{off_delta:+.1f}%" if off_delta is not None else None)
-
+k1.metric(
+    f"📦 총 매출",
+    fmt_won(total_rev),
+    f"{rev_delta:+.1f}%  ({delta_label})" if rev_delta is not None else None,
+)
+k2.metric(
+    f"🔵 온라인 매출",
+    fmt_won(online_rev),
+    f"{on_delta:+.1f}%  ({delta_label})" if on_delta is not None else None,
+)
+k3.metric(
+    f"🟠 오프라인 매출",
+    fmt_won(offline_rev),
+    f"{off_delta:+.1f}%  ({delta_label})" if off_delta is not None else None,
+)
 st.markdown("---")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 탭
+# 탭 — A안: [📊 요약] [🔵 온라인] [🟠 오프라인] [🏆 순위]
 # ─────────────────────────────────────────────────────────────────────────────
 
-tab_overview, tab_channel, tab_product, tab_ranking = st.tabs([
-    "📈 매출 추이", "📡 채널별 분석", "📦 제품별 성과", "🏆 판매 순위",
+tab_summary, tab_online, tab_offline, tab_ranking = st.tabs([
+    "📊 요약", "🔵 온라인", "🟠 오프라인", "🏆 판매 순위",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 : 매출 추이
+# TAB 1 : 요약
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab_overview:
-    unit = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="ov_unit")
+with tab_summary:
+    sv_unit = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="sv_unit")
 
     agg_cols = ["총_매출", "온라인_매출", "오프라인_매출", "총_수량"]
-    agg = resample_df(df[["날짜"] + agg_cols], unit, agg_cols)
+    agg = resample_df(df[["날짜"] + agg_cols], sv_unit, agg_cols)
 
-    # 온/오프 매출 추이 단일 차트
+    # 매출 추이 (Bar + Line 혼합)
     x = agg["날짜"]
     fig_trend = go.Figure()
     fig_trend.add_trace(go.Bar(x=x, y=agg["총_매출"], name="총합",
@@ -522,257 +565,292 @@ with tab_overview:
         hovermode="x unified",
         yaxis=dict(tickformat=","),
     )
-    st.plotly_chart(fig_trend, use_container_width=True)
+    st.plotly_chart(fig_trend, use_container_width=True, key="sv_trend")
 
-    # 채널 구성 파이
-    col_pie1, col_pie2 = st.columns(2)
+    # 채널 기여도 — 파이 대신 가로바 2열
+    st.markdown('<p class="sec-head">채널별 기여도</p>', unsafe_allow_html=True)
+    col_on, col_off = st.columns(2)
 
-    on_rev_by_ch = {
-        ch["name"]: df[f"{ch['name']}_매출"].sum()
-        for ch in online_channels if f"{ch['name']}_매출" in df.columns
-    }
-    with col_pie1:
-        if on_rev_by_ch:
-            pie_on = pd.DataFrame(on_rev_by_ch.items(), columns=["채널", "매출"])
-            pie_on = pie_on[pie_on["매출"] > 0].sort_values("매출", ascending=False)
-            fig_pie_on = px.pie(pie_on, names="채널", values="매출",
-                                title="온라인 채널 매출 구성", hole=0.4)
-            fig_pie_on.update_traces(textposition="inside")
-            fig_pie_on.update_layout(height=380, legend=dict(orientation="v", x=1.0))
-            st.plotly_chart(fig_pie_on, use_container_width=True)
+    with col_on:
+        if on_rev_list:
+            on_df = pd.DataFrame(on_rev_list, columns=["채널", "매출"]).sort_values("매출")
+            fig_on_sv = px.bar(
+                on_df, x="매출", y="채널", orientation="h",
+                title="온라인 채널별 매출",
+                color="매출", color_continuous_scale="Blues",
+                text="매출",
+            )
+            fig_on_sv.update_traces(
+                texttemplate="%{text:,.0f}", textposition="outside"
+            )
+            fig_on_sv.update_layout(
+                height=max(260, len(on_df) * 32 + 80),
+                yaxis=dict(autorange="reversed"),
+                showlegend=False, plot_bgcolor="white",
+            )
+            st.plotly_chart(fig_on_sv, use_container_width=True, key="sv_on_bar")
 
-    off_rev_by_ch = {
-        ch["name"]: df[f"{ch['name']}_매출"].sum()
-        for ch in offline_channels if f"{ch['name']}_매출" in df.columns
-    }
-    with col_pie2:
-        if off_rev_by_ch:
-            pie_off = pd.DataFrame(off_rev_by_ch.items(), columns=["채널", "매출"])
-            pie_off = pie_off[pie_off["매출"] > 0].nlargest(12, "매출")
-            fig_pie_off = px.pie(pie_off, names="채널", values="매출",
-                                 title="오프라인 매장 매출 구성 (Top 12)", hole=0.4)
-            fig_pie_off.update_traces(textposition="inside")
-            fig_pie_off.update_layout(height=380, legend=dict(orientation="v", x=1.0))
-            st.plotly_chart(fig_pie_off, use_container_width=True)
+    with col_off:
+        if off_rev_list:
+            top15_off = off_rev_list[:15]
+            off_df = pd.DataFrame(top15_off, columns=["채널", "매출"]).sort_values("매출")
+            fig_off_sv = px.bar(
+                off_df, x="매출", y="채널", orientation="h",
+                title="오프라인 매장별 매출 (Top 15)",
+                color="매출", color_continuous_scale="Oranges",
+                text="매출",
+            )
+            fig_off_sv.update_traces(
+                texttemplate="%{text:,.0f}", textposition="outside"
+            )
+            fig_off_sv.update_layout(
+                height=max(260, len(off_df) * 32 + 80),
+                yaxis=dict(autorange="reversed"),
+                showlegend=False, plot_bgcolor="white",
+            )
+            st.plotly_chart(fig_off_sv, use_container_width=True, key="sv_off_bar")
 
-    # 일별 상세 테이블
-    st.subheader("일별 상세 데이터")
-    disp = agg[["날짜", "온라인_매출", "오프라인_매출", "총_매출"]].copy()
-    for c in ["온라인_매출", "오프라인_매출", "총_매출"]:
-        disp[c] = disp[c].apply(lambda v: f"{int(v):,}")
-    disp["날짜"] = disp["날짜"].apply(
-        lambda d: d.strftime("%Y-%m-%d") if unit == "일간"
-        else d.strftime("%Y-%m-%d 주") if unit == "주간"
-        else d.strftime("%Y-%m"))
-    st.dataframe(disp, use_container_width=True, hide_index=True)
+    # 상세 테이블 — expander로 접기
+    with st.expander("📋 일별 상세 데이터 보기"):
+        disp = agg[["날짜", "온라인_매출", "오프라인_매출", "총_매출"]].copy()
+        for c in ["온라인_매출", "오프라인_매출", "총_매출"]:
+            disp[c] = disp[c].apply(lambda v: f"{int(v):,}")
+        disp["날짜"] = disp["날짜"].apply(
+            lambda d: d.strftime("%Y-%m-%d") if sv_unit == "일간"
+            else d.strftime("%Y-%m-%d 주") if sv_unit == "주간"
+            else d.strftime("%Y-%m"))
+        st.dataframe(disp, use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 : 채널별 분석
+# TAB 2 : 온라인
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab_channel:
-    ch_unit  = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="ch_unit")
-    ch_focus = st.radio("채널 구분", ["온라인", "오프라인", "전체"], horizontal=True, key="ch_focus")
+with tab_online:
+    # 온라인 KPI
+    top_on_ch  = on_rev_list[0][0] if on_rev_list else "—"
+    oa, ob, oc = st.columns(3)
+    oa.metric(
+        "🔵 온라인 총매출",
+        fmt_won(online_rev),
+        f"{on_delta:+.1f}%  ({delta_label})" if on_delta is not None else None,
+    )
+    ob.metric("📡 활성 채널 수", f"{len(on_rev_list)}개")
+    oc.metric("🥇 최다 매출 채널", top_on_ch[:14] + "…" if len(top_on_ch) > 14 else top_on_ch)
 
-    # 온라인
-    if ch_focus in ("온라인", "전체"):
-        st.subheader("🔵 온라인 채널별 매출")
-        on_long = channel_long(df, online_channels, "온라인", ch_unit, "매출")
-        if not on_long.empty:
-            fig_on_line = px.line(
-                on_long, x="날짜", y="매출", color="채널",
-                markers=True, title=f"온라인 채널별 {ch_unit} 매출",
-            )
-            fig_on_line.update_layout(height=380, hovermode="x unified",
-                                      legend=dict(orientation="h", y=-0.25),
-                                      plot_bgcolor="white")
-            st.plotly_chart(fig_on_line, use_container_width=True)
-
-            fig_on_bar = px.bar(
-                on_long, x="날짜", y="매출", color="채널", barmode="stack",
-                title=f"온라인 채널 구성 ({ch_unit})",
-            )
-            fig_on_bar.update_layout(height=320,
-                                     legend=dict(orientation="h", y=-0.3),
-                                     plot_bgcolor="white")
-            st.plotly_chart(fig_on_bar, use_container_width=True)
-
-            on_total = on_long.groupby("채널")["매출"].sum().reset_index().sort_values("매출", ascending=True)
-            fig_on_tot = px.bar(on_total, x="매출", y="채널", orientation="h",
-                                title="온라인 채널별 총 매출 (기간 합산)",
-                                color="매출", color_continuous_scale="Blues")
-            fig_on_tot.update_layout(height=max(300, len(on_total)*32+80),
-                                     yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_on_tot, use_container_width=True)
-
-    # 오프라인
-    if ch_focus in ("오프라인", "전체"):
-        st.subheader("🟠 오프라인 매장별 매출")
-        off_long = channel_long(df, offline_channels, "오프라인", ch_unit, "매출")
-        if not off_long.empty:
-            top_n = st.slider("상위 N 매장", 5, min(20, len(offline_channels)), 10, key="off_topn")
-            top_stores = (off_long.groupby("채널")["매출"].sum()
-                          .nlargest(top_n).index.tolist())
-            off_top = off_long[off_long["채널"].isin(top_stores)]
-
-            fig_off_bar = px.bar(
-                off_top, x="날짜", y="매출", color="채널", barmode="stack",
-                title=f"오프라인 상위 {top_n} 매장 {ch_unit} 매출",
-            )
-            fig_off_bar.update_layout(height=380,
-                                      legend=dict(orientation="h", y=-0.3),
-                                      plot_bgcolor="white")
-            st.plotly_chart(fig_off_bar, use_container_width=True)
-
-            off_total = (off_long.groupby("채널")["매출"].sum()
-                         .reset_index().nlargest(top_n, "매출")
-                         .sort_values("매출", ascending=True))
-            fig_off_tot = px.bar(off_total, x="매출", y="채널", orientation="h",
-                                 title=f"오프라인 매장별 총 매출 Top{top_n}",
-                                 color="매출", color_continuous_scale="Oranges")
-            fig_off_tot.update_layout(height=max(300, top_n*32+80),
-                                      yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_off_tot, use_container_width=True)
-
-    # 기간 비교
     st.markdown("---")
-    st.subheader("📊 기간 비교")
-    _tmax = df_ch["날짜"].max().date()
-    _tmin = df_ch["날짜"].min().date()
-    comp_c1, comp_c2 = st.columns(2)
-    with comp_c1:
-        cur_range = st.date_input("현재 기간", (_tmax - timedelta(days=13), _tmax),
-                                  min_value=_tmin, max_value=_tmax, key="comp_cur")
-    with comp_c2:
-        prev_range = st.date_input("비교 기간",
-                                   (_tmax - timedelta(days=27), _tmax - timedelta(days=14)),
-                                   min_value=_tmin, max_value=_tmax, key="comp_prev")
 
-    if isinstance(cur_range, tuple) and isinstance(prev_range, tuple):
-        df_cur  = df_ch[(df_ch["날짜"].dt.date >= cur_range[0])  & (df_ch["날짜"].dt.date <= cur_range[1])]
-        df_prev = df_ch[(df_ch["날짜"].dt.date >= prev_range[0]) & (df_ch["날짜"].dt.date <= prev_range[1])]
-        target_chs = online_channels if ch_focus == "온라인" else \
-                     offline_channels if ch_focus == "오프라인" else \
-                     online_channels + offline_channels
-        comp_rows = []
-        for ch in target_chs:
-            col = f"{ch['name']}_매출"
-            if col not in df_ch.columns:
-                continue
-            c, p = df_cur[col].sum(), df_prev[col].sum()
-            comp_rows.append({"채널": ch["name"], "구분": ch["type"],
-                               "현재": c, "비교": p,
-                               "변화율": (c-p)/p*100 if p else 0})
-        if comp_rows:
-            comp_df = pd.DataFrame(comp_rows).sort_values("현재", ascending=False)
-            m = comp_df.melt(id_vars="채널", value_vars=["현재", "비교"],
-                             var_name="기간", value_name="매출")
-            fig_comp = px.bar(m, x="채널", y="매출", color="기간", barmode="group",
-                              title="채널별 기간 비교",
-                              color_discrete_map={"현재": "#1565C0", "비교": "#90CAF9"})
-            fig_comp.update_layout(height=420, plot_bgcolor="white",
-                                   legend=dict(orientation="h", y=-0.12))
-            st.plotly_chart(fig_comp, use_container_width=True)
-            comp_disp = comp_df.copy()
-            comp_disp["현재"]   = comp_disp["현재"].apply(lambda v: f"{int(v):,}")
-            comp_disp["비교"]   = comp_disp["비교"].apply(lambda v: f"{int(v):,}")
-            comp_disp["변화율"] = comp_disp["변화율"].map("{:+.1f}%".format)
-            st.dataframe(comp_disp, use_container_width=True, hide_index=True)
+    on_unit = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="on_unit")
+    on_long = channel_long(df, online_channels, "온라인", on_unit, "매출")
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 : 제품별 성과
-# ══════════════════════════════════════════════════════════════════════════════
-
-with tab_product:
-    prod_focus = st.radio("데이터 기준", ["온/오프 통합", "온라인만", "오프라인만"],
-                          horizontal=True, key="prod_focus")
-    prod_unit  = st.radio("기간 단위", ["일간", "주간", "월간"],
-                          horizontal=True, key="prod_unit")
-
-    src_df = {"온/오프 통합": df_p, "온라인만": df_po, "오프라인만": df_pf}[prod_focus]
-
-    if src_df.empty:
-        st.info("제품 데이터가 없습니다.")
+    if on_long.empty:
+        st.info("온라인 채널 데이터가 없습니다.")
     else:
-        META_COLS = {"날짜", "요일", "목표", "달성률", "매출(거래액)",
-                     "매출(결제액)\n*취소 제외", "매출(결제액) *취소 제외",
-                     "매출 거래액+결제액", "수량",
-                     "목표 *결제액 기준", "목표\n*결제액 기준",
-                     "매출\n거래액+결제액", "목표\n"}
-        prod_cols = [c for c in src_df.columns
-                     if c not in META_COLS
-                     and not c.startswith("매출")
-                     and c != "날짜"]
+        # 채널별 기여도 가로바
+        on_rank = on_long.groupby("채널")["매출"].sum().reset_index().sort_values("매출")
+        fig_on_rank = px.bar(
+            on_rank, x="매출", y="채널", orientation="h",
+            title="채널별 총 매출 (기간 합산)",
+            color="매출", color_continuous_scale="Blues",
+            text="매출",
+        )
+        fig_on_rank.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+        fig_on_rank.update_layout(
+            height=max(260, len(on_rank) * 34 + 80),
+            yaxis=dict(autorange="reversed"),
+            showlegend=False, plot_bgcolor="white",
+        )
+        st.plotly_chart(fig_on_rank, use_container_width=True, key="on_rank_bar")
 
-        prod_total = src_df[prod_cols].sum().sort_values(ascending=False)
-        prod_total = prod_total[prod_total > 0]
+        # 채널별 추이 라인
+        fig_on_line = px.line(
+            on_long, x="날짜", y="매출", color="채널",
+            markers=True, title=f"채널별 {on_unit} 매출 추이",
+        )
+        fig_on_line.update_layout(
+            height=360, hovermode="x unified",
+            legend=dict(orientation="h", y=-0.25),
+            plot_bgcolor="white",
+        )
+        st.plotly_chart(fig_on_line, use_container_width=True, key="on_line")
 
-        if prod_total.empty:
+    # 온라인 제품 성과
+    st.markdown('<p class="sec-head">온라인 제품 성과</p>', unsafe_allow_html=True)
+    if df_po.empty:
+        st.info("온라인 제품 데이터가 없습니다.")
+    else:
+        on_pcols = _prod_cols(df_po)
+        on_ptotal = df_po[on_pcols].sum().sort_values(ascending=False)
+        on_ptotal = on_ptotal[on_ptotal > 0]
+        if on_ptotal.empty:
             st.info("판매 데이터가 없습니다.")
         else:
-            top_n_prod = st.slider("상위 N 제품", 5, min(30, len(prod_total)), 15, key="prod_n")
-            top_prods  = prod_total.nlargest(top_n_prod).index.tolist()
+            top_n_op = st.slider("상위 N 제품", 5, min(20, len(on_ptotal)), 10, key="on_prod_n")
+            top_op   = on_ptotal.nlargest(top_n_op)
 
-            col_a, col_b = st.columns(2)
-            with col_a:
-                fig_bar = px.bar(
-                    x=prod_total[top_prods].values,
-                    y=[p[:20] for p in top_prods],
-                    orientation="h",
-                    title=f"상위 {top_n_prod} 제품 판매량 (기간 합산)",
-                    color=prod_total[top_prods].values,
-                    color_continuous_scale="Greens",
-                    labels={"x": "판매량", "y": ""},
-                )
-                fig_bar.update_layout(yaxis=dict(autorange="reversed"), height=480)
-                st.plotly_chart(fig_bar, use_container_width=True, key="prod_bar")
+            fig_op = px.bar(
+                x=top_op.values,
+                y=[p[:22] for p in top_op.index],
+                orientation="h",
+                title=f"온라인 Top {top_n_op} 제품 (기간 합산)",
+                color=top_op.values,
+                color_continuous_scale="Blues",
+                labels={"x": "판매량", "y": ""},
+            )
+            fig_op.update_layout(
+                yaxis=dict(autorange="reversed"),
+                height=max(280, top_n_op * 30 + 80),
+                showlegend=False, plot_bgcolor="white",
+            )
+            st.plotly_chart(fig_op, use_container_width=True, key="on_prod_bar")
 
-            with col_b:
-                fig_pie = px.pie(
-                    names=[p[:20] for p in top_prods],
-                    values=prod_total[top_prods].values,
-                    title=f"판매량 구성 (Top {top_n_prod})",
-                    hole=0.4,
-                )
-                fig_pie.update_layout(height=480)
-                st.plotly_chart(fig_pie, use_container_width=True, key="prod_pie")
+            # 추이
+            d_op = df_po[["날짜"] + top_op.index.tolist()].copy()
+            if on_unit == "주간":
+                d_op["날짜"] = d_op["날짜"].dt.to_period("W").dt.start_time
+            elif on_unit == "월간":
+                d_op["날짜"] = d_op["날짜"].dt.to_period("M").dt.start_time
+            d_op = d_op.groupby("날짜")[top_op.index.tolist()].sum().reset_index()
+            d_op_long = d_op.melt(id_vars="날짜", var_name="제품", value_name="판매량")
+            d_op_long["제품"] = d_op_long["제품"].str[:18]
 
-            # 추이 차트
-            st.subheader("제품별 판매 추이")
-            d_trend = src_df[["날짜"] + top_prods].copy()
-            if prod_unit == "주간":
-                d_trend["날짜"] = d_trend["날짜"].dt.to_period("W").dt.start_time
-            elif prod_unit == "월간":
-                d_trend["날짜"] = d_trend["날짜"].dt.to_period("M").dt.start_time
-            d_trend = d_trend.groupby("날짜")[top_prods].sum().reset_index()
-            d_long  = d_trend.melt(id_vars="날짜", var_name="제품", value_name="판매량")
-            d_long["제품_단축"] = d_long["제품"].str[:18]
+            fig_op_line = px.line(
+                d_op_long, x="날짜", y="판매량", color="제품",
+                markers=True, title=f"Top {top_n_op} 제품 {on_unit} 판매 추이",
+            )
+            fig_op_line.update_layout(
+                height=380, hovermode="x unified",
+                legend=dict(orientation="h", y=-0.3, font=dict(size=10)),
+                plot_bgcolor="white",
+            )
+            st.plotly_chart(fig_op_line, use_container_width=True, key="on_prod_line")
 
-            fig_line = px.line(d_long, x="날짜", y="판매량", color="제품_단축",
-                               markers=True, title=f"상위 {top_n_prod} 제품 {prod_unit} 판매 추이")
-            fig_line.update_layout(height=420, hovermode="x unified",
-                                   legend=dict(orientation="h", y=-0.3, font=dict(size=10)),
-                                   plot_bgcolor="white")
-            st.plotly_chart(fig_line, use_container_width=True, key="prod_line")
 
-            # 히트맵
-            pivot = d_trend.set_index("날짜")[top_prods].T
-            pivot.index = [p[:20] for p in pivot.index]
-            pivot.columns = [c.strftime("%m/%d") if prod_unit == "일간"
-                             else c.strftime("%m/%d 주") if prod_unit == "주간"
-                             else c.strftime("%Y-%m")
-                             for c in pivot.columns]
-            fig_heat = go.Figure(go.Heatmap(
-                z=pivot.values, x=list(pivot.columns), y=list(pivot.index),
-                colorscale="Greens",
-                hovertemplate="날짜: %{x}<br>제품: %{y}<br>판매량: %{z:,.0f}<extra></extra>",
-            ))
-            fig_heat.update_layout(title=f"제품 × 날짜 히트맵 ({prod_unit} 판매량)",
-                                   height=max(300, top_n_prod*28+100),
-                                   margin=dict(l=200))
-            st.plotly_chart(fig_heat, use_container_width=True, key="prod_heat")
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 : 오프라인
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_offline:
+    # 오프라인 KPI
+    top_off_ch  = off_rev_list[0][0] if off_rev_list else "—"
+    fa, fb, fc  = st.columns(3)
+    fa.metric(
+        "🟠 오프라인 총매출",
+        fmt_won(offline_rev),
+        f"{off_delta:+.1f}%  ({delta_label})" if off_delta is not None else None,
+    )
+    fb.metric("🏪 활성 매장 수", f"{len(off_rev_list)}개")
+    fc.metric(
+        "🥇 최다 매출 매장",
+        top_off_ch[:14] + "…" if len(top_off_ch) > 14 else top_off_ch,
+    )
+
+    st.markdown("---")
+
+    off_unit = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="off_unit")
+    top_n_off = st.slider("표시 매장 수", 5, min(30, len(off_rev_list)) if off_rev_list else 5,
+                          min(15, len(off_rev_list)) if off_rev_list else 5, key="off_topn")
+
+    off_long = channel_long(df, offline_channels, "오프라인", off_unit, "매출")
+
+    if off_long.empty:
+        st.info("오프라인 채널 데이터가 없습니다.")
+    else:
+        top_stores = (off_long.groupby("채널")["매출"].sum()
+                      .nlargest(top_n_off).index.tolist())
+        off_top = off_long[off_long["채널"].isin(top_stores)]
+
+        # 매장별 기여도 가로바
+        off_rank = off_top.groupby("채널")["매출"].sum().reset_index().sort_values("매출")
+        fig_off_rank = px.bar(
+            off_rank, x="매출", y="채널", orientation="h",
+            title=f"매장별 총 매출 Top {top_n_off}",
+            color="매출", color_continuous_scale="Oranges",
+            text="매출",
+        )
+        fig_off_rank.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+        fig_off_rank.update_layout(
+            height=max(280, top_n_off * 30 + 80),
+            yaxis=dict(autorange="reversed"),
+            showlegend=False, plot_bgcolor="white",
+        )
+        st.plotly_chart(fig_off_rank, use_container_width=True, key="off_rank_bar")
+
+        # 히트맵: 매장 × 날짜 (스택바 대신)
+        pivot_heat = off_top.pivot_table(
+            index="채널", columns="날짜", values="매출", aggfunc="sum"
+        ).fillna(0)
+        col_labels = [
+            c.strftime("%m/%d")   if off_unit == "일간"
+            else c.strftime("%m/%d") if off_unit == "주간"
+            else c.strftime("%Y-%m")
+            for c in pivot_heat.columns
+        ]
+        fig_heat = go.Figure(go.Heatmap(
+            z=pivot_heat.values,
+            x=col_labels,
+            y=list(pivot_heat.index),
+            colorscale="Oranges",
+            hovertemplate="날짜: %{x}<br>매장: %{y}<br>매출: %{z:,.0f}<extra></extra>",
+        ))
+        fig_heat.update_layout(
+            title=f"매장 × 날짜 히트맵 ({off_unit} 매출)",
+            height=max(400, top_n_off * 24 + 120),
+            margin=dict(l=170, r=20, t=50, b=50),
+            plot_bgcolor="white",
+        )
+        st.plotly_chart(fig_heat, use_container_width=True, key="off_heat")
+
+    # 오프라인 제품 성과
+    st.markdown('<p class="sec-head">오프라인 제품 성과</p>', unsafe_allow_html=True)
+    if df_pf.empty:
+        st.info("오프라인 제품 데이터가 없습니다.")
+    else:
+        off_pcols  = _prod_cols(df_pf)
+        off_ptotal = df_pf[off_pcols].sum().sort_values(ascending=False)
+        off_ptotal = off_ptotal[off_ptotal > 0]
+        if off_ptotal.empty:
+            st.info("판매 데이터가 없습니다.")
+        else:
+            top_n_fp = st.slider("상위 N 제품", 5, min(20, len(off_ptotal)), 10, key="off_prod_n")
+            top_fp   = off_ptotal.nlargest(top_n_fp)
+
+            fig_fp = px.bar(
+                x=top_fp.values,
+                y=[p[:22] for p in top_fp.index],
+                orientation="h",
+                title=f"오프라인 Top {top_n_fp} 제품 (기간 합산)",
+                color=top_fp.values,
+                color_continuous_scale="Oranges",
+                labels={"x": "판매량", "y": ""},
+            )
+            fig_fp.update_layout(
+                yaxis=dict(autorange="reversed"),
+                height=max(280, top_n_fp * 30 + 80),
+                showlegend=False, plot_bgcolor="white",
+            )
+            st.plotly_chart(fig_fp, use_container_width=True, key="off_prod_bar")
+
+            # 추이
+            d_fp = df_pf[["날짜"] + top_fp.index.tolist()].copy()
+            if off_unit == "주간":
+                d_fp["날짜"] = d_fp["날짜"].dt.to_period("W").dt.start_time
+            elif off_unit == "월간":
+                d_fp["날짜"] = d_fp["날짜"].dt.to_period("M").dt.start_time
+            d_fp = d_fp.groupby("날짜")[top_fp.index.tolist()].sum().reset_index()
+            d_fp_long = d_fp.melt(id_vars="날짜", var_name="제품", value_name="판매량")
+            d_fp_long["제품"] = d_fp_long["제품"].str[:18]
+
+            fig_fp_line = px.line(
+                d_fp_long, x="날짜", y="판매량", color="제품",
+                markers=True, title=f"Top {top_n_fp} 제품 {off_unit} 판매 추이",
+            )
+            fig_fp_line.update_layout(
+                height=380, hovermode="x unified",
+                legend=dict(orientation="h", y=-0.3, font=dict(size=10)),
+                plot_bgcolor="white",
+            )
+            st.plotly_chart(fig_fp_line, use_container_width=True, key="off_prod_line")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -781,12 +859,12 @@ with tab_product:
 
 with tab_ranking:
     rank_unit = st.radio("순위 기준", ["월간", "주간"], horizontal=True, key="rank_unit")
-    df_rank = df_rank_m if rank_unit == "월간" else df_rank_w
+    df_rank   = df_rank_m if rank_unit == "월간" else df_rank_w
 
     if df_rank.empty:
         st.info("판매 순위 데이터가 없습니다.")
     else:
-        periods = sorted(df_rank["기준일"].unique(), reverse=True)
+        periods       = sorted(df_rank["기준일"].unique(), reverse=True)
         period_labels = df_rank.drop_duplicates("기준일").set_index("기준일")["기간"].to_dict()
         active_periods = (
             df_rank.groupby("기준일")["판매량"].sum()
@@ -794,23 +872,27 @@ with tab_ranking:
             .index.tolist()
         )
         default_period = sorted(active_periods, reverse=True)[0] if active_periods else periods[0]
-        default_idx = periods.index(default_period) if default_period in periods else 0
+        default_idx    = periods.index(default_period) if default_period in periods else 0
+
         sel_period = st.selectbox(
             "기간 선택", options=periods, index=default_idx,
             format_func=lambda x: period_labels.get(x, x),
         )
 
-        df_sel = df_rank[df_rank["기준일"] == sel_period]
+        df_sel         = df_rank[df_rank["기준일"] == sel_period]
         avail_channels = sorted(df_sel["채널"].unique())
-        sel_channels = st.multiselect("채널 선택", avail_channels,
-                                      default=["온&오프라인 통합_단품", "온라인_단품", "오프라인_단품"],
-                                      key="rank_channels")
+        default_chs    = [c for c in ["온&오프라인 통합_단품", "온라인_단품", "오프라인_단품"]
+                          if c in avail_channels]
+        sel_channels   = st.multiselect("채널 선택", avail_channels,
+                                        default=default_chs or avail_channels[:3],
+                                        key="rank_channels")
         if not sel_channels:
             sel_channels = avail_channels[:3]
 
         df_view = df_sel[df_sel["채널"].isin(sel_channels)]
         n_cols  = min(3, len(sel_channels))
         cols_r  = st.columns(n_cols)
+
         for i, ch in enumerate(sel_channels):
             df_ch_rank = df_view[df_view["채널"] == ch].sort_values("순위")
             with cols_r[i % n_cols]:
@@ -827,9 +909,11 @@ with tab_ranking:
                 fig_r.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
                 fig_r.update_layout(
                     height=300, showlegend=False,
-                    yaxis=dict(autorange="reversed",
-                               ticktext=[p[:15] for p in df_ch_rank.head(5)["제품명"]],
-                               tickvals=df_ch_rank.head(5)["제품명"].tolist()),
+                    yaxis=dict(
+                        autorange="reversed",
+                        ticktext=[p[:15] for p in df_ch_rank.head(5)["제품명"]],
+                        tickvals=df_ch_rank.head(5)["제품명"].tolist(),
+                    ),
                     xaxis_title="", yaxis_title="",
                     margin=dict(l=120, r=20, t=10, b=10),
                     plot_bgcolor="white",
