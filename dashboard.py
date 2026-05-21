@@ -606,12 +606,6 @@ if df_raw.empty:
 st.sidebar.markdown("---")
 st.sidebar.subheader("필터")
 
-if "상품카테고리(대)" in df_raw.columns:
-    cats = ["전체"] + sorted(df_raw["상품카테고리(대)"].dropna().unique().tolist())
-    sel_cat = st.sidebar.selectbox("상품 카테고리(대)", cats)
-    if sel_cat != "전체":
-        df_raw = df_raw[df_raw["상품카테고리(대)"] == sel_cat]
-
 _max_date = df_raw["날짜"].max().date()
 _min_date = df_raw["날짜"].min().date()
 
@@ -1050,7 +1044,7 @@ with tab_conversion:
     else:
         cv1, cv2 = st.columns([1, 1])
         with cv1:
-            cv_period = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=False, key="cv_period")
+            cv_period = st.radio("기간 단위", ["일간", "주간", "월간"], horizontal=True, key="cv_period")
         with cv2:
             # 채널그룹 필터 (기본 표시 단위)
             cv_all_groups = sorted(df_traffic["채널그룹"].dropna().unique()) if "채널그룹" in df_traffic.columns else []
