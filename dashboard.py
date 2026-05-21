@@ -713,13 +713,28 @@ with tab_prod_trend:
         # 상품명을 15자로 줄여서 범례 가독성 확보
         df_grouped["상품명_단축"] = df_grouped["상품명"].str[:18]
 
+        # 날짜별 순위 계산 & 전체 합산 기준 정렬 (툴팁 표시 순서)
+        df_grouped["순위"] = (
+            df_grouped.groupby("날짜")[metric_sel]
+            .rank(ascending=False, method="min")
+            .astype(int)
+        )
+        total_rank_order = (
+            df_grouped.groupby("상품명_단축")[metric_sel]
+            .sum()
+            .sort_values(ascending=False)
+            .index.tolist()
+        )
+
         # ── 멀티라인 차트 ──────────────────────────────────────────────
         fig_line = px.line(
             df_grouped,
             x="날짜", y=metric_sel, color="상품명_단축",
             markers=True,
+            custom_data=["순위", "상품명_단축"],
             title=f"상위 {top_n_trend}개 상품 {period_sel} {metric_sel} 추이",
             labels={"상품명_단축": "상품명", metric_sel: metric_sel},
+            category_orders={"상품명_단축": total_rank_order},
         )
         fig_line.update_layout(
             height=460,
@@ -728,7 +743,10 @@ with tab_prod_trend:
             hovermode="x unified",
             plot_bgcolor="white",
         )
-        fig_line.update_traces(line=dict(width=2.5))
+        fig_line.update_traces(
+            line=dict(width=2.5),
+            hovertemplate="%{customdata[0]}위&nbsp;&nbsp;%{customdata[1]}: %{y:,.0f}<extra></extra>",
+        )
         st.plotly_chart(fig_line, use_container_width=True)
 
         # ── 누적 바차트 ────────────────────────────────────────────────
