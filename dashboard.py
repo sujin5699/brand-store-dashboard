@@ -455,7 +455,7 @@ def _render_anomaly_cards(alerts: list[dict], kind: str = "product") -> None:
             )
 
 
-def render_trend_chart(agg: pd.DataFrame, title: str, x_fmt: str):
+def render_trend_chart(agg: pd.DataFrame, title: str, x_fmt: str, prev_agg: pd.DataFrame = None):
     fig = make_subplots(
         rows=2, cols=2,
         subplot_titles=("결제금액", "결제수 / 결제상품수량", "환불금액 & 환불율", "모바일 비율"),
@@ -483,6 +483,28 @@ def render_trend_chart(agg: pd.DataFrame, title: str, x_fmt: str):
     fig.add_trace(go.Scatter(x=x, y=agg["모바일비율"] * 100, name="모바일비율(%)",
                               mode="lines+markers", fill="tozeroy",
                               line=dict(color="#00BCD4"), showlegend=False), row=2, col=2)
+
+    # ── Ghost lines: 이전 기간 점선 오버레이 ──────────────────────────────
+    if prev_agg is not None and not prev_agg.empty:
+        p  = prev_agg.sort_values("날짜").reset_index(drop=True)
+        gx = agg.sort_values("날짜")["날짜"].reset_index(drop=True)
+        n  = min(len(gx), len(p))
+        gx, p = gx.iloc[:n], p.iloc[:n]
+        gkw = dict(mode="lines", opacity=0.4, showlegend=True, legendgroup="ghost")
+
+        fig.add_trace(go.Scatter(x=gx, y=p["결제금액"],
+            name="▷ 전기간 결제금액",
+            line=dict(color="#4CAF50", dash="dot", width=1.5), **gkw), row=1, col=1)
+        fig.add_trace(go.Scatter(x=gx, y=p["결제수"],
+            name="▷ 전기간 결제수",
+            line=dict(color="#2196F3", dash="dot", width=1.5), **gkw), row=1, col=2)
+        prev_rr = (p["환불금액"] / p["결제금액"].replace(0, np.nan) * 100).fillna(0)
+        fig.add_trace(go.Scatter(x=gx, y=p["환불금액"],
+            name="▷ 전기간 환불금액",
+            line=dict(color="#f44336", dash="dot", width=1.5), **gkw), row=2, col=1)
+        fig.add_trace(go.Scatter(x=gx, y=p["모바일비율"] * 100,
+            name="▷ 전기간 모바일비율",
+            line=dict(color="#00BCD4", dash="dot", width=1.5), **gkw), row=2, col=2)
 
     fig.update_layout(
         title=title,
@@ -700,7 +722,9 @@ _df_prev         = _df_full_raw[
     (_df_full_raw["날짜"].dt.date >= _prev_start_date) &
     (_df_full_raw["날짜"].dt.date <= _prev_end_date)
 ]
-_daily_prev  = aggregate_daily(_df_prev) if not _df_prev.empty else pd.DataFrame()
+_daily_prev   = aggregate_daily(_df_prev)            if not _df_prev.empty else pd.DataFrame()
+_weekly_prev  = aggregate_weekly(_daily_prev)        if not _daily_prev.empty else pd.DataFrame()
+_monthly_prev = aggregate_monthly(_daily_prev)       if not _daily_prev.empty else pd.DataFrame()
 _prev_label  = f"{_prev_start_date.strftime('%m/%d')}~{_prev_end_date.strftime('%m/%d')}"
 
 def _delta_pct(cur, prev_df, col):
@@ -817,7 +841,8 @@ with tab_sales:
     with sub_trend:
         period_sel = _auto_period
         if period_sel == "일간":
-            st.plotly_chart(render_trend_chart(daily, "일간 판매 추이", "%m/%d"), use_container_width=True)
+            st.plotly_chart(render_trend_chart(daily, "일간 판매 추이", "%m/%d",
+                            prev_agg=_daily_prev if not _daily_prev.empty else None), use_container_width=True)
             st.subheader("일별 상세 데이터")
             disp = daily.copy()
             disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m-%d")
@@ -829,7 +854,8 @@ with tab_sales:
             if len(weekly) < 2:
                 st.info("주간 집계를 위해 2주 이상 데이터가 필요합니다.")
             else:
-                st.plotly_chart(render_trend_chart(weekly, "주간 판매 추이", "%m/%d 주"), use_container_width=True)
+                st.plotly_chart(render_trend_chart(weekly, "주간 판매 추이", "%m/%d 주",
+                                prev_agg=_weekly_prev if not _weekly_prev.empty else None), use_container_width=True)
                 disp = weekly.copy()
                 disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m-%d 주")
                 disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
@@ -840,7 +866,8 @@ with tab_sales:
             if len(monthly) < 1:
                 st.info("월간 집계 데이터가 없습니다.")
             else:
-                st.plotly_chart(render_trend_chart(monthly, "월간 판매 추이", "%Y-%m"), use_container_width=True)
+                st.plotly_chart(render_trend_chart(monthly, "월간 판매 추이", "%Y-%m",
+                                prev_agg=_monthly_prev if not _monthly_prev.empty else None), use_container_width=True)
                 disp = monthly.copy()
                 disp["날짜"] = disp["날짜"].dt.strftime("%Y-%m")
                 disp["결제금액"] = disp["결제금액"].apply(lambda x: f"{int(x):,}")
